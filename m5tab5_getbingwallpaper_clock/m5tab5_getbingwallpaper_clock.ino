@@ -16,6 +16,8 @@ https://rop.nl/truetype2gfx/
 #include "FreeSansBold80pt7b.h"
 #include "rx8130.h"
 #include "ntpsynctime.h"
+#include "net.h"
+#include "PreferencesUtil.h"
 
 
 #define SDIO2_CLK GPIO_NUM_12
@@ -27,11 +29,69 @@ https://rop.nl/truetype2gfx/
 #define SDIO2_RST GPIO_NUM_15
 
 static int wifiloadNum = 0;
-const char *ssid     = "yourssid";
-const char *password = "yourpassword";
+String wifissid     = "yourssid";
+String wifipassword = "yourpassword";
 static bool wifistatus = false;
 RX8130_Class RX8130;
 
+
+// M5 Touch Button
+m5::touch_detail_t touchDetail;
+static int32_t button_w=300;
+static int32_t button_h=100;
+
+LGFX_Button WifiConfigButton;
+static bool wifi_config_start_flag =false;
+
+
+static void WifiConfigButton_init()
+{
+    M5.Display.setFont(&fonts::FreeSansBold24pt7b);
+    WifiConfigButton.initButton(&M5.Lcd, 1280 / 2, 500, button_w, button_h, TFT_BLUE, TFT_YELLOW, TFT_BLACK, "WifiConfig",1, 1);
+    WifiConfigButton.drawButton();
+}
+
+TaskHandle_t TouchCheckTask;
+
+static void TouchCheck_task(void *pvParameters) 
+{
+  int nums=0;
+  while(1)
+  {
+    vTaskDelay(20);
+    M5.update();
+    touchDetail = M5.Touch.getDetail();  
+    if (touchDetail.isPressed()) 
+    {
+      if(WifiConfigButton.contains(touchDetail.x, touchDetail.y))
+      {
+          // M5.Display.drawString("Button  Pressed", w / 2, 0, &fonts::FreeMonoBold24pt7b);
+          if(wifi_config_start_flag==false)
+          {
+            Serial.println("WifiConfigButton pressed");
+            M5.Display.drawCenterString("Wifi config starting ...", 1280 / 2, 720/2, &fonts::FreeMonoBold24pt7b);
+            disconnectWiFi();
+            vTaskDelay(20);
+            wifiConfigBySoftAP();
+            wifi_config_start_flag=true;
+            Serial.println("Wifi SoftAP Set Finished,start listening...");
+            break;
+          }
+
+      }
+    }
+    // else {
+    //   M5.Display.drawString("Button Released", w / 2, 0, &fonts::FreeMonoBold24pt7b);
+    // }
+  }
+    vTaskDelete(TouchCheckTask);
+}
+
+
+void createTouchCheckTask()
+{
+  xTaskCreate(TouchCheck_task, "TouchCheck_task", 4*8192, NULL, 10, &TouchCheckTask);
+}
 
 // LGFX_Sprite sprite(&M5.Display);
 
@@ -135,6 +195,17 @@ void setup()
     M5.begin();
     Serial.begin(115200);
 
+    // setInfo4Test();
+    getInfo();
+    printInfo();
+
+    wifissid = ssid ;
+    wifipassword = pass ;
+    Serial.printf("wifi ssid : ");
+    Serial.println(wifissid);
+    Serial.printf("wifi password : ");
+    Serial.println(wifipassword);
+
     rx8130_init();
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS mount failed");
@@ -158,9 +229,9 @@ void setup()
     WiFi.mode(WIFI_STA);
     WiFi.onEvent(WiFiEvent);
     M5.Display.println("WiFi mode set to STA");
-    WiFi.begin(ssid, password);
+    WiFi.begin(wifissid.c_str(), wifipassword.c_str());
     M5.Display.print("Connecting to ");
-    M5.Display.println(ssid);
+    M5.Display.println(wifissid);
     // Wait for connection
     while (WiFi.status() != WL_CONNECTED) {
         for(byte n=0;n<10;n++)//每500毫秒检测一次状态 
@@ -182,7 +253,7 @@ void setup()
     WiFi.disconnect();
     M5.Display.println("");
     M5.Display.print("Connect to ");
-    M5.Display.print(ssid);
+    M5.Display.print(wifissid);
     M5.Display.println(" failed");
     wifistatus = false;
   }
@@ -190,7 +261,7 @@ void setup()
   {
     M5.Display.println("");
     M5.Display.print("Connected to ");
-    M5.Display.println(ssid);
+    M5.Display.println(wifissid);
     M5.Display.print("IP address: ");
     M5.Display.println(WiFi.localIP());
     wifistatus = true;
@@ -210,6 +281,8 @@ void setup()
     else
     {
       M5.Display.fillScreen(BLACK);
+      WifiConfigButton_init();
+      // createTouchCheckTask();
     }
     
 
@@ -235,6 +308,7 @@ void show_clock_time(struct tm *time,bool force_refresh)
       else
       {
         M5.Display.fillScreen(BLACK);
+        WifiConfigButton_init();
       }
   }
   getRtcTime(time);
@@ -265,15 +339,44 @@ void loop()
 
     while(1)
     {
-      getRtcTime(&time);
-      Serial.printf("Time: %d/%d/%d %d:%d:%d\n", time.tm_year + 1900, time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min,
-          time.tm_sec);
-      if(oldminutes!=time.tm_min)
+      if(wifi_config_start_flag)
       {
-        show_clock_time(&time,true);
+         doClient();
+         delay(20);
       }
-      delay(1000);
-      oldminutes= time.tm_min;
+      else
+      {
+        M5.update();
+        touchDetail = M5.Touch.getDetail();  
+        if (touchDetail.isPressed()) 
+        {
+          if(WifiConfigButton.contains(touchDetail.x, touchDetail.y))
+          {
+              // M5.Display.drawString("Button  Pressed", w / 2, 0, &fonts::FreeMonoBold24pt7b);
+              if(wifi_config_start_flag==false)
+              {
+                Serial.println("WifiConfigButton pressed");
+                M5.Display.drawCenterString("Wifi config starting ...", 1280 / 2, 720/2, &fonts::FreeMonoBold24pt7b);
+                disconnectWiFi();
+                vTaskDelay(20);
+                wifiConfigBySoftAP();
+                wifi_config_start_flag=true;
+                Serial.println("Wifi SoftAP Set Finished,start listening...");
+              }
+
+          }
+        }
+
+        getRtcTime(&time);
+        if(oldminutes!=time.tm_min)
+        {
+          Serial.printf("Time: %d/%d/%d %d:%d:%d\n", time.tm_year + 1900, time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min,
+              time.tm_sec);
+          show_clock_time(&time,true);
+        }
+        delay(200);
+        oldminutes= time.tm_min;
+      }
     }
 
 } 
