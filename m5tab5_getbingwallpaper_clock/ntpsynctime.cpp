@@ -18,6 +18,7 @@ WiFiUDP Udp;
 unsigned int localPort = 8000;
 const int NTP_PACKET_SIZE = 48; // NTP时间在消息的前48字节中
 byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
+static bool ntpsyncfinished = false;
 
 static time_t getNtpTime();
 
@@ -170,6 +171,7 @@ static void wifi_sync_time_task(void *pvParameters)
       time.tm_min  = minute();
       time.tm_sec  = second();
       setRtcTime(&time);
+      ntpsyncfinished=true;
     }
     if(!ret)
     {
@@ -187,6 +189,11 @@ static void wifi_sync_time_task(void *pvParameters)
   }
 
   vTaskDelete(wifiSyncTimeTask);
+}
+
+bool is_ntpsync_finished()
+{
+  return ntpsyncfinished;
 }
 
 

@@ -7,6 +7,7 @@
 #include "rx8130.h"
 
 void createWiFiSyncTimeTask();
+bool is_ntpsync_finished();
 
 
 #endif

@@ -31,7 +31,7 @@ https://rop.nl/truetype2gfx/
 static int wifiloadNum = 0;
 String wifissid     = "yourssid";
 String wifipassword = "yourpassword";
-static bool wifistatus = false;
+static bool wifistatus_startup = false;
 RX8130_Class RX8130;
 
 
@@ -51,47 +51,51 @@ static void WifiConfigButton_init()
     WifiConfigButton.drawButton();
 }
 
-TaskHandle_t TouchCheckTask;
-
-static void TouchCheck_task(void *pvParameters) 
+static void WifiConfigButton_check()
 {
-  int nums=0;
-  while(1)
+  M5.update();
+  touchDetail = M5.Touch.getDetail();  
+  if (touchDetail.isPressed()) 
   {
-    vTaskDelay(20);
-    M5.update();
-    touchDetail = M5.Touch.getDetail();  
-    if (touchDetail.isPressed()) 
+    if(WifiConfigButton.contains(touchDetail.x, touchDetail.y))
     {
-      if(WifiConfigButton.contains(touchDetail.x, touchDetail.y))
-      {
-          // M5.Display.drawString("Button  Pressed", w / 2, 0, &fonts::FreeMonoBold24pt7b);
-          if(wifi_config_start_flag==false)
+        // M5.Display.drawString("Button  Pressed", w / 2, 0, &fonts::FreeMonoBold24pt7b);
+        if(wifi_config_start_flag==false)
+        {
+          Serial.println("WifiConfigButton pressed");
+          M5.Display.drawCenterString("Wifi config starting ...", 1280 / 2, 720/2, &fonts::FreeMonoBold24pt7b);
+          if(WiFi.status() == WL_CONNECTED)
           {
-            Serial.println("WifiConfigButton pressed");
-            M5.Display.drawCenterString("Wifi config starting ...", 1280 / 2, 720/2, &fonts::FreeMonoBold24pt7b);
             disconnectWiFi();
-            vTaskDelay(20);
-            wifiConfigBySoftAP();
-            wifi_config_start_flag=true;
-            Serial.println("Wifi SoftAP Set Finished,start listening...");
-            break;
           }
+          vTaskDelay(20);
+          wifiConfigBySoftAP();
+          wifi_config_start_flag=true;
+          Serial.println("Wifi SoftAP Set Finished,start listening...");
+        }
 
-      }
     }
-    // else {
-    //   M5.Display.drawString("Button Released", w / 2, 0, &fonts::FreeMonoBold24pt7b);
-    // }
   }
-    vTaskDelete(TouchCheckTask);
 }
 
+// TaskHandle_t TouchCheckTask;
 
-void createTouchCheckTask()
-{
-  xTaskCreate(TouchCheck_task, "TouchCheck_task", 4*8192, NULL, 10, &TouchCheckTask);
-}
+// static void TouchCheck_task(void *pvParameters) 
+// {
+//   int nums=0;
+//   while(1)
+//   {
+//     vTaskDelay(20);
+//     WifiConfigButton_check();
+//   }
+//     vTaskDelete(TouchCheckTask);
+// }
+
+
+// void createTouchCheckTask()
+// {
+//   xTaskCreate(TouchCheck_task, "TouchCheck_task", 4*8192, NULL, 10, &TouchCheckTask);
+// }
 
 // LGFX_Sprite sprite(&M5.Display);
 
@@ -188,6 +192,90 @@ void listFiles() {
   }
 }
 
+void show_clock_time(struct tm *time,bool force_refresh)
+{
+  char timeStrBuffer[32];
+  String timeStr="";
+  if(force_refresh)
+  {
+      if(wifistatus_startup)
+      {
+        M5.Display.drawJpgFile(SPIFFS,"/bing_wallpaper.jpg", 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
+      }
+      else
+      {
+        M5.Display.fillScreen(BLACK);
+        WifiConfigButton_init();
+      }
+  }
+  getRtcTime(time);
+  sprintf(timeStrBuffer, "%02d:%02d",time->tm_hour, time->tm_min);
+  timeStr = String(timeStrBuffer);
+  M5.Display.setFont(&FreeSansBold80pt7b);
+  M5.Display.setTextColor(WHITE);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.drawCenterString(timeStr, 1280/2, 160/2);
+  sprintf(timeStrBuffer, "%04d    %02d/%02d",time->tm_year + 1900, time->tm_mon + 1, time->tm_mday);
+  timeStr = String(timeStrBuffer);
+  M5.Display.setFont(&fonts::FreeSansBold24pt7b);
+  M5.Display.setTextColor(WHITE);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.drawCenterString(timeStr, 1280/2, 230);
+}
+
+
+TaskHandle_t WallPaperClockShowTaskHandle;
+
+static void WallPaperClockShow_task(void *pvParameters) 
+{
+  static struct tm time;
+  
+  char oldminutes=0;
+  getRtcTime(&time);
+  oldminutes = time.tm_min;
+  show_clock_time(&time,false);
+  while(1)
+  {
+    getRtcTime(&time);
+    if(oldminutes!=time.tm_min)
+    {
+      Serial.printf("Time: %d/%d/%d %d:%d:%d\n", time.tm_year + 1900, time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min,
+          time.tm_sec);
+      show_clock_time(&time,true);
+    }
+    delay(1000);
+    oldminutes= time.tm_min;
+  }
+}
+
+
+void WallPaperClockShowTask()
+{
+  xTaskCreate(WallPaperClockShow_task, "WallPaperClockShow_task", 16*1024, NULL, 10, &WallPaperClockShowTaskHandle);
+}
+
+
+
+void WifiStatusManager_task(void *pvParameters) 
+{
+  while(1)
+  {
+    if(wifistatus_startup)
+    {
+      if((WiFi.status() == WL_CONNECTED) && (is_ntpsync_finished()))
+      {
+        disconnectWiFi(); 
+        Serial.println("ntp sync success, wallpaper get sunccess,disconnect wifi");
+      }
+    }
+    delay(1000);
+  }
+}
+
+void WifiStatusManagerTask()
+{
+  xTaskCreate(WifiStatusManager_task, "WifiStatusManager_task", 2*8192, NULL, 10, NULL);
+}
 
 
 void setup()
@@ -255,7 +343,7 @@ void setup()
     M5.Display.print("Connect to ");
     M5.Display.print(wifissid);
     M5.Display.println(" failed");
-    wifistatus = false;
+    wifistatus_startup = false;
   }
   else if(WiFi.status() == WL_CONNECTED)
   {
@@ -264,118 +352,65 @@ void setup()
     M5.Display.println(wifissid);
     M5.Display.print("IP address: ");
     M5.Display.println(WiFi.localIP());
-    wifistatus = true;
+    wifistatus_startup = true;
   }
 
+  delay(1500);
+  if(wifistatus_startup)
+  {
+    M5.Display.fillScreen(BLACK);
+    M5.Display.setCursor(0,0);
+    M5.Display.print("IP address: ");
+    M5.Display.println(WiFi.localIP());
+    M5.Display.println("show bing wallpaper...");
+  }
+  delay(1500);
 
 
-    createWiFiSyncTimeTask();
-    if(wifistatus)
-    {
-      getBingWallpaper();
-      listFiles();
-      // void drawJpgFile(T &fs, const char *path, int32_t x = 0, int32_t y = 0, int32_t maxWidth = 0, int32_t maxHeight = 0, int32_t offX = 0, int32_t offY = 0, float scale_x = 1.0f, float scale_y = 0.0f, datum_t datum = datum_t::top_left)
-      
-      M5.Display.drawJpgFile(SPIFFS,"/bing_wallpaper.jpg", 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
-    }
-    else
-    {
-      M5.Display.fillScreen(BLACK);
-      WifiConfigButton_init();
-      // createTouchCheckTask();
-    }
+  if(wifistatus_startup)
+  {
+    M5.Display.setBrightness(0);
+    getBingWallpaper();
+    listFiles();
+    // void drawJpgFile(T &fs, const char *path, int32_t x = 0, int32_t y = 0, int32_t maxWidth = 0, int32_t maxHeight = 0, int32_t offX = 0, int32_t offY = 0, float scale_x = 1.0f, float scale_y = 0.0f, datum_t datum = datum_t::top_left)
     
+    M5.Display.drawJpgFile(SPIFFS,"/bing_wallpaper.jpg", 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
+    M5.Display.setBrightness(255);
+
+  }
+  else
+  {
+    M5.Display.fillScreen(BLACK);
+    WifiConfigButton_init();
+    // createTouchCheckTask();
+  }
+  createWiFiSyncTimeTask();
+
 
 
     M5.Display.setFont(&FreeSansBold80pt7b);
-
+    WallPaperClockShowTask();
+    WifiStatusManagerTask();
   // sprite.setColorDepth(16);
   // sprite.setFont(&FreeSansBold80pt7b);
   // sprite.setTextDatum(middle_center);
 }
 
-
-void show_clock_time(struct tm *time,bool force_refresh)
-{
-  char timeStrBuffer[32];
-  String timeStr="";
-  if(force_refresh)
-  {
-      if(wifistatus)
-      {
-        M5.Display.drawJpgFile(SPIFFS,"/bing_wallpaper.jpg", 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
-      }
-      else
-      {
-        M5.Display.fillScreen(BLACK);
-        WifiConfigButton_init();
-      }
-  }
-  getRtcTime(time);
-  sprintf(timeStrBuffer, "%02d:%02d",time->tm_hour, time->tm_min);
-  timeStr = String(timeStrBuffer);
-  M5.Display.setFont(&FreeSansBold80pt7b);
-  M5.Display.setTextColor(WHITE);
-  M5.Display.setTextDatum(middle_center);
-  M5.Display.drawCenterString(timeStr, 1280/2, 160/2);
-  sprintf(timeStrBuffer, "%04d    %02d/%02d",time->tm_year + 1900, time->tm_mon + 1, time->tm_mday);
-  timeStr = String(timeStrBuffer);
-  M5.Display.setFont(&fonts::FreeSansBold24pt7b);
-  M5.Display.setTextColor(WHITE);
-  M5.Display.setTextDatum(middle_center);
-  M5.Display.drawCenterString(timeStr, 1280/2, 230);
-}
-
-
-
 void loop()
 {
-    static struct tm time;
-    
-    char oldminutes=0;
-    getRtcTime(&time);
-    oldminutes = time.tm_min;
-    show_clock_time(&time,false);
-
     while(1)
-    {
+    {         
+      delay(50);
       if(wifi_config_start_flag)
       {
          doClient();
-         delay(20);
       }
       else
       {
-        M5.update();
-        touchDetail = M5.Touch.getDetail();  
-        if (touchDetail.isPressed()) 
+        if(!wifistatus_startup)
         {
-          if(WifiConfigButton.contains(touchDetail.x, touchDetail.y))
-          {
-              // M5.Display.drawString("Button  Pressed", w / 2, 0, &fonts::FreeMonoBold24pt7b);
-              if(wifi_config_start_flag==false)
-              {
-                Serial.println("WifiConfigButton pressed");
-                M5.Display.drawCenterString("Wifi config starting ...", 1280 / 2, 720/2, &fonts::FreeMonoBold24pt7b);
-                disconnectWiFi();
-                vTaskDelay(20);
-                wifiConfigBySoftAP();
-                wifi_config_start_flag=true;
-                Serial.println("Wifi SoftAP Set Finished,start listening...");
-              }
-
-          }
+          WifiConfigButton_check();
         }
-
-        getRtcTime(&time);
-        if(oldminutes!=time.tm_min)
-        {
-          Serial.printf("Time: %d/%d/%d %d:%d:%d\n", time.tm_year + 1900, time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min,
-              time.tm_sec);
-          show_clock_time(&time,true);
-        }
-        delay(200);
-        oldminutes= time.tm_min;
       }
     }
 
