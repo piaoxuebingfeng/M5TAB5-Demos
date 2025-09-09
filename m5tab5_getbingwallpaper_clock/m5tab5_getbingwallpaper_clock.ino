@@ -18,6 +18,8 @@ https://rop.nl/truetype2gfx/
 #include "ntpsynctime.h"
 #include "net.h"
 #include "PreferencesUtil.h"
+#include "pi4ioe5v6408.h"
+#include "ina226.h"
 
 
 #define SDIO2_CLK GPIO_NUM_12
@@ -34,6 +36,9 @@ String wifipassword = "yourpassword";
 static bool wifistatus_startup = false;
 RX8130_Class RX8130;
 
+PI4IOE5V6408_Class _io_expander_b(0x44);
+
+INA226_Class INA226(0x41);
 
 // M5 Touch Button
 m5::touch_detail_t touchDetail;
@@ -135,6 +140,86 @@ void getRtcTime(struct tm* time)
 }
 
 
+
+void _io_expander_b_init()
+{
+  if(!_io_expander_b.begin())
+  {
+    Serial.println("pi4ioe5v6408 init failed!");
+    return;
+  }
+  else
+  {
+    Serial.println("pi4ioe5v6408 init success");
+    _io_expander_b.resetIrq();
+
+    // P0 : WLAN_PWR_EN : HIGH -> enable
+    _io_expander_b.setDirection(0,true);
+    _io_expander_b.setPullMode(0, false);
+    _io_expander_b.setHighImpedance(0, false);
+    _io_expander_b.digitalWrite(0, true);
+  
+    // // P1 : unused
+    // // P2 : unused
+
+    // P3 : USB5V_EN : HIGH -> enable
+    _io_expander_b.setDirection(3,true);
+    _io_expander_b.setPullMode(3, false);
+    _io_expander_b.setHighImpedance(3, false);
+    _io_expander_b.digitalWrite(3, true);
+
+    // P4 : PWR_OFF_PULSE : LOW
+    _io_expander_b.setDirection(4,true);
+    _io_expander_b.setPullMode(4, false);
+    _io_expander_b.setHighImpedance(4, false);
+    _io_expander_b.digitalWrite(4, false);
+
+    // P5 : nCHG_QC_EN : LOW -> quick charge
+    _io_expander_b.setDirection(5,true);
+    _io_expander_b.setPullMode(5, false);
+    _io_expander_b.setHighImpedance(5, false);
+    _io_expander_b.digitalWrite(5, true);
+    // P6 : CHG_STAT
+    _io_expander_b.setDirection(6,false);
+    _io_expander_b.setPullMode(6, true);
+    _io_expander_b.setHighImpedance(6, false);
+
+    // P7 : CHG_EN : LOW -> disable
+    // chg enable
+    _io_expander_b.setDirection(7,true);
+    _io_expander_b.setPullMode(7, false);
+    _io_expander_b.setHighImpedance(7, false);
+    _io_expander_b.digitalWrite(7, true);
+    delay(1000);
+    Serial.println("pi4ioe5v6408 set CHG_EN true");
+  }
+}
+
+
+void ina226_init()
+{
+    if (!INA226.begin()) {
+        Serial.println("ina226 init failed");
+    } else {
+        // 28.4 Hz
+        INA226.configure(INA226_AVERAGES_16, INA226_BUS_CONV_TIME_1100US, INA226_SHUNT_CONV_TIME_1100US,
+                         INA226_MODE_SHUNT_BUS_CONT);
+        INA226.calibrate(0.05, 8.192);
+    }
+}
+
+float getPowerVoltage()
+{
+    return INA226.readBusVoltage();
+}
+
+float getShuntCurrent()
+{
+    return INA226.readShuntCurrent();
+}
+
+
+
 void getBingWallpaper() {
   HTTPClient http;
   String jsonDataUrl = "http://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=zh-CN";
@@ -221,6 +306,14 @@ void show_clock_time(struct tm *time,bool force_refresh)
   M5.Display.setTextColor(WHITE);
   M5.Display.setTextDatum(middle_center);
   M5.Display.drawCenterString(timeStr, 1280/2, 230);
+
+  sprintf(timeStrBuffer, "V: %.2f  A:%.2f",getPowerVoltage(), getShuntCurrent());
+  timeStr = String(timeStrBuffer);
+  M5.Display.setFont(&fonts::FreeSansBold24pt7b);
+  M5.Display.setTextColor(GREEN);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.drawCenterString(timeStr, 1280/2, 300);
+
 }
 
 
@@ -242,6 +335,12 @@ static void WallPaperClockShow_task(void *pvParameters)
       Serial.printf("Time: %d/%d/%d %d:%d:%d\n", time.tm_year + 1900, time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min,
           time.tm_sec);
       show_clock_time(&time,true);
+      // Serial.printf("getBatteryVoltage : %d\n",M5.Power.getBatteryVoltage());
+      // Serial.printf("getBatteryCurrent : %d\n",M5.Power.getBatteryCurrent());
+
+      Serial.printf("getPowerVoltage : %.2f\n",getPowerVoltage());
+      Serial.printf("getShuntCurrent : %.2f\n",getShuntCurrent());
+      
     }
     delay(1000);
     oldminutes= time.tm_min;
@@ -282,6 +381,9 @@ void setup()
 {
     M5.begin();
     Serial.begin(115200);
+  
+
+
 
     // setInfo4Test();
     getInfo();
@@ -294,11 +396,28 @@ void setup()
     Serial.printf("wifi password : ");
     Serial.println(wifipassword);
 
+    _io_expander_b_init();
+    ina226_init();
     rx8130_init();
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS mount failed");
         return;
     }
+
+
+    if(M5.Power.isCharging())
+    {
+      Serial.println("tab5 power is charging now ...");
+    }
+    else
+    {
+      Serial.println("tab5 power not charge");
+    }
+    // Serial.printf("getBatteryVoltage : %d\n",M5.Power.getBatteryVoltage());
+    // Serial.printf("getBatteryCurrent : %d\n",M5.Power.getBatteryCurrent());
+    Serial.printf("getPowerVoltage : %.2f\n",getPowerVoltage());
+    Serial.printf("getShuntCurrent : %.2f\n",getShuntCurrent());
+
 
     M5.Display.setFont(&fonts::FreeMonoBoldOblique24pt7b);
     M5.Display.setRotation(3);
