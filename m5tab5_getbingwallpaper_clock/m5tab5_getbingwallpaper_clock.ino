@@ -219,6 +219,14 @@ float getShuntCurrent()
 }
 
 
+void M5Display_CenterString(String showstr)
+{
+  M5.Display.fillScreen(BLACK);
+  // M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+  M5.Display.setColor(WHITE);
+  M5.Display.drawCenterString(showstr, 1280 / 2, 720/2, &fonts::FreeSansBold12pt7b);
+}
+
 
 void getBingWallpaper() {
   HTTPClient http;
@@ -247,22 +255,84 @@ void getBingWallpaper() {
   http.end();
 }
 
-void downloadImage(String imageUrl) {
+void getBingWallpapers() {
   HTTPClient http;
-  http.begin(imageUrl);
+  // 修改n=7以获取最近7天的壁纸
+  String jsonDataUrl = "http://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=7&mkt=zh-CN";
   
+  http.begin(jsonDataUrl);
   int httpResponseCode = http.GET();
+  
   if (httpResponseCode == HTTP_CODE_OK) {
-    File file = SPIFFS.open("/bing_wallpaper.jpg", FILE_WRITE);
-    if (file) {
-      http.writeToStream(&file);
-      file.close();
-      Serial.println("Image downloaded successfully");
+    String payload = http.getString();
+    
+    // 解析JSON
+    DynamicJsonDocument doc(8192); // 增加缓冲区大小以适应更多数据
+    deserializeJson(doc, payload);
+    
+    // 获取图片数组
+    JsonArray images = doc["images"];
+    
+    // 遍历最近7天的壁纸
+    for (int i = 0; i < images.size() && i < 7; i++) {
+      String imageUrl = images[i]["url"].as<String>();
+      
+      // 替换分辨率
+      imageUrl.replace("1920x1080", "1280x720");
+      M5Display_CenterString(imageUrl);
+      String fullUrl = "http://bing.com" + imageUrl;
+      
+      Serial.println("Downloading image " + String(i) + ": " + fullUrl);
+      
+      // 为每张图片创建不同的文件名
+      String filename = "/bing_wallpaper_" + String(i) + ".jpg";
+      downloadImage(fullUrl, filename);
+      delay(50);
     }
   }
   
   http.end();
 }
+
+// 修改downloadImage函数以支持自定义文件名
+void downloadImage(String imageUrl, String filename) {
+  HTTPClient http;
+  http.begin(imageUrl);
+  
+  int httpResponseCode = http.GET();
+  if (httpResponseCode == HTTP_CODE_OK) {
+    File file = SPIFFS.open(filename, FILE_WRITE);
+    if (file) {
+      http.writeToStream(&file);
+      file.close();
+      Serial.println("Image downloaded successfully: " + filename);
+    }
+  }
+  
+  http.end();
+}
+
+// 保持原有的downloadImage函数以保证兼容性
+void downloadImage(String imageUrl) {
+  downloadImage(imageUrl, "/bing_wallpaper.jpg");
+}
+
+// void downloadImage(String imageUrl) {
+//   HTTPClient http;
+//   http.begin(imageUrl);
+  
+//   int httpResponseCode = http.GET();
+//   if (httpResponseCode == HTTP_CODE_OK) {
+//     File file = SPIFFS.open("/bing_wallpaper.jpg", FILE_WRITE);
+//     if (file) {
+//       http.writeToStream(&file);
+//       file.close();
+//       Serial.println("Image downloaded successfully");
+//     }
+//   }
+  
+//   http.end();
+// }
 
 void listFiles() {
   File root = SPIFFS.open("/");
@@ -277,6 +347,107 @@ void listFiles() {
   }
 }
 
+// 定义最大图片数量
+#define MAX_JPG_IMAGES 20
+// 存储图片路径的数组
+String jpgImagePaths[MAX_JPG_IMAGES];
+// 图片数量计数器
+int jpgImageCount = 0;
+int currentJpgImageIndex = 0;
+
+void listJpgImages() {
+  // 重置计数器
+  jpgImageCount = 0;
+  
+  File root = SPIFFS.open("/");
+  File file = root.openNextFile();
+  
+  while(file && jpgImageCount < MAX_JPG_IMAGES) {
+    String fileName = file.name();
+    // 检查文件扩展名是否为 .jpg
+    if (fileName.endsWith(".jpg") || fileName.endsWith(".JPG")) {
+      jpgImagePaths[jpgImageCount] = "/" + fileName;
+      jpgImageCount++;
+      Serial.println("Found image: " + fileName);
+    }
+    file = root.openNextFile();
+  }
+  
+  root.close();
+  Serial.println("Total JPG images found: " + String(jpgImageCount));
+
+  for (int i = 0; i < jpgImageCount; i++) 
+  {
+    Serial.println("Image " + String(i) + ": " + jpgImagePaths[i]);
+    // 可以在这里使用图片路径，例如显示图片:
+    // M5.Display.drawJpgFile(SPIFFS, jpgImagePaths[i].c_str(), 0, 0);
+  }
+}
+
+// /atoms3rcamera.jpg
+// 清除 SPIFFS
+
+
+// // 方法1: 删除所有JPG文件
+// void deleteAllJpgFiles() {
+//   File root = SPIFFS.open("/");
+//   File file = root.openNextFile();
+  
+//   while(file) {
+//     String fileName = file.name();
+//     if (fileName.endsWith(".jpg") || fileName.endsWith(".JPG")) {
+//       file.close();
+//       SPIFFS.remove(fileName);
+//       Serial.println("Deleted: " + fileName);
+//     } else {
+//       file.close();
+//     }
+//     file = root.openNextFile();
+//   }
+//   root.close();
+// }
+
+
+// // 方法2: 格式化整个SPIFFS文件系统（会删除所有文件）
+// void formatSPIFFS() {
+//   Serial.println("Formatting SPIFFS...");
+//   SPIFFS.format();
+//   Serial.println("SPIFFS formatted");
+// }
+
+// 方法3: 删除指定的壁纸文件
+void deleteBingWallpapers() {
+  // 删除默认壁纸
+  if (SPIFFS.exists("/atoms3rcamera.jpg")) {
+    SPIFFS.remove("/atoms3rcamera.jpg");
+    Serial.println("Deleted: /atoms3rcamera.jpg");
+  }
+  
+  // // 删除编号壁纸
+  // for (int i = 0; i < 10; i++) {
+  //   String filename = "/bing_wallpaper_" + String(i) + ".jpg";
+  //   if (SPIFFS.exists(filename)) {
+  //     SPIFFS.remove(filename);
+  //     Serial.println("Deleted: " + filename);
+  //   }
+  // }
+}
+
+// // 方法4: 删除所有文件（逐个删除）
+// void deleteAllFiles() {
+//   File root = SPIFFS.open("/");
+//   File file = root.openNextFile();
+  
+//   while(file) {
+//     String fileName = file.name();
+//     file.close(); // 必须先关闭文件
+//     SPIFFS.remove(fileName);
+//     Serial.println("Deleted: " + fileName);
+//     file = root.openNextFile();
+//   }
+//   root.close();
+// }
+
 void show_clock_time(struct tm *time,bool force_refresh)
 {
   char timeStrBuffer[32];
@@ -285,7 +456,13 @@ void show_clock_time(struct tm *time,bool force_refresh)
   {
       if(wifistatus_startup)
       {
-        M5.Display.drawJpgFile(SPIFFS,"/bing_wallpaper.jpg", 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
+        // M5.Display.drawJpgFile(SPIFFS,"/bing_wallpaper.jpg", 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
+        Serial.println(jpgImagePaths[currentJpgImageIndex]);
+        M5.Display.drawJpgFile(SPIFFS,jpgImagePaths[currentJpgImageIndex++].c_str(), 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
+        if(currentJpgImageIndex>jpgImageCount-1)
+        {
+          currentJpgImageIndex = 0;
+        }
       }
       else
       {
@@ -309,10 +486,11 @@ void show_clock_time(struct tm *time,bool force_refresh)
 
   sprintf(timeStrBuffer, "V: %.2f  A:%.2f",getPowerVoltage(), getShuntCurrent());
   timeStr = String(timeStrBuffer);
-  M5.Display.setFont(&fonts::FreeSansBold24pt7b);
-  M5.Display.setTextColor(GREEN);
+  // M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+  M5.Display.setTextColor(RED);
   M5.Display.setTextDatum(middle_center);
-  M5.Display.drawCenterString(timeStr, 1280/2, 300);
+  M5.Display.drawCenterString(timeStr, 1280/2, 300,&fonts::FreeSansBold12pt7b);
+  M5.Display.setTextColor(WHITE);
 
 }
 
@@ -488,12 +666,23 @@ void setup()
 
   if(wifistatus_startup)
   {
-    M5.Display.setBrightness(0);
-    getBingWallpaper();
-    listFiles();
+    M5.Display.setBrightness(5);
+    // getBingWallpaper();
+    // listFiles();
+
+    currentJpgImageIndex=0;
+    getBingWallpapers();
+    // deleteBingWallpapers();
+    listJpgImages();
+
     // void drawJpgFile(T &fs, const char *path, int32_t x = 0, int32_t y = 0, int32_t maxWidth = 0, int32_t maxHeight = 0, int32_t offX = 0, int32_t offY = 0, float scale_x = 1.0f, float scale_y = 0.0f, datum_t datum = datum_t::top_left)
-    
-    M5.Display.drawJpgFile(SPIFFS,"/bing_wallpaper.jpg", 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
+    M5.Display.fillScreen(BLACK);
+    Serial.println(jpgImagePaths[currentJpgImageIndex]);
+    M5.Display.drawJpgFile(SPIFFS,jpgImagePaths[currentJpgImageIndex++].c_str(), 0, 0,1280,720,0,0,1.0,1.0,datum_t::top_left);
+    if(currentJpgImageIndex>jpgImageCount-1)
+    {
+      currentJpgImageIndex = 0;
+    }
     M5.Display.setBrightness(255);
 
   }
