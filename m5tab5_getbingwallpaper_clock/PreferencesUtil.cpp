@@ -17,6 +17,20 @@ static uint8_t alarmvoicevalue;
 // 读取一系列初始化参数
 void getInfo(){
   prefs.begin("project");
+
+    // 检查是否已经存储过数据，通过检查ssid是否存在来判断
+  if (!prefs.isKey("ssid")) {
+    // 如果没有存储过数据，则写入默认值
+    prefs.putString("ssid", ssid);
+    prefs.putString("pass", pass);
+    prefs.putString("city", city);
+    prefs.putString("adm", adm);
+    prefs.putString("location", location);
+    prefs.putInt("bright", BRIGHT);
+    prefs.putInt("alarmvoice", ALARM_VOICE_VALUE_DEFAULT);
+    prefs.putInt("backColor", BACK_BLACK);
+  }
+  
   ssid = prefs.getString("ssid", "");
   pass = prefs.getString("pass", "");
   city = prefs.getString("city", "");

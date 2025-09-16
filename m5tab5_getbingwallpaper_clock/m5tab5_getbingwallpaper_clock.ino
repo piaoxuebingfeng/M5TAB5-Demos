@@ -583,14 +583,16 @@ void setup()
     }
 
 
-    if(M5.Power.isCharging())
-    {
-      Serial.println("tab5 power is charging now ...");
-    }
-    else
-    {
-      Serial.println("tab5 power not charge");
-    }
+    // if(M5.Power.isCharging())
+    // {
+    //   Serial.println("tab5 power is charging now ...");
+    // }
+    // else
+    // {
+    //   Serial.println("tab5 power not charge");
+    // }
+
+
     // Serial.printf("getBatteryVoltage : %d\n",M5.Power.getBatteryVoltage());
     // Serial.printf("getBatteryCurrent : %d\n",M5.Power.getBatteryCurrent());
     Serial.printf("getPowerVoltage : %.2f\n",getPowerVoltage());
