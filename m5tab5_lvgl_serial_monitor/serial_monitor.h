@@ -10,7 +10,7 @@
 
 #define UART_QUEUE_WAIT_MS 100
 #define UART_TASKDELAY 20
-#define TERM_LINE_MAX 50
+#define TERM_LINE_MAX 128
 
 #define COLOR_SCREEN_BG 0x000000
 #define COLOR_TERM_RX_TEXT 0x00FF00
@@ -20,6 +20,7 @@
 typedef struct {
     String data_string;
     bool is_rx;
+    uint16_t length;
 } uart_data_t;
 
 enum SerialSource {

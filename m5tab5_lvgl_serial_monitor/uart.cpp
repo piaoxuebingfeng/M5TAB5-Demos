@@ -4,7 +4,7 @@ QueueHandle_t uart_queue;
 bool is_queue_ok;
 SemaphoreHandle_t lvgl_mutex;
 uint32_t lineCount = 0;
-SerialSource currentSerialSource = SERIAL_SOURCE_SERIAL2;
+SerialSource currentSerialSource = SERIAL_SOURCE_SERIAL;
 
 #define UART_RX_PIN 53
 #define UART_TX_PIN 54
@@ -26,6 +26,7 @@ static void task_uart(void *pvParameters)
                 if (input.length() > 0) {
                     q.data_string = input.substring(0, 256);
                     q.is_rx = true;
+                    q.length = input.length();
                     if (is_queue_ok && uart_queue != NULL) {
                         xQueueSend(uart_queue, &q, 0);
                     }
@@ -41,6 +42,7 @@ static void task_uart(void *pvParameters)
                 if (input.length() > 0) {
                     q.data_string = input.substring(0, 256);
                     q.is_rx = true;
+                    q.length = input.length();
                     if (is_queue_ok && uart_queue != NULL) {
                         xQueueSend(uart_queue, &q, 0);
                     }
