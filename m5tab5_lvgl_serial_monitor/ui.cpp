@@ -30,6 +30,8 @@ typedef struct _objects_t {
     lv_obj_t *txcount;
     lv_obj_t *rxcount;
     lv_obj_t *errcount;
+    lv_obj_t *helpbtn;
+    lv_obj_t *helpbtnlabel;
 } objects_t;
 
 objects_t objects;
@@ -58,6 +60,117 @@ static uint32_t current_baud = 115200;
 static uint8_t current_databits = 8;
 static uint8_t current_stopbits = 1;
 static uint8_t current_parity = 0;
+
+static void helpbtn_event_cb(lv_event_t * e);
+
+static lv_obj_t * help_dialog = NULL;
+
+static void help_dialog_close_event_cb(lv_event_t * e)
+{
+    (void)e;
+    if (help_dialog != NULL) {
+        lv_obj_add_flag(help_dialog, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void show_help_dialog(void)
+{
+    if (help_dialog != NULL) {
+        lv_obj_clear_flag(help_dialog, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_obj_t * parent = objects.main;
+
+    lv_obj_t * dialog = lv_obj_create(parent);
+    help_dialog = dialog;
+    lv_obj_set_pos(dialog, 340, 160);
+    lv_obj_set_size(dialog, 600, 360);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0xff666666), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(dialog, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(0xff888888), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(dialog, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(dialog, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    {
+        lv_obj_t * title = lv_label_create(dialog);
+        lv_label_set_text(title, "Serial Port Pin Info");
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(title, lv_color_hex(0xffffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+    }
+
+    {
+        lv_obj_t * close_btn = lv_btn_create(dialog);
+        lv_obj_set_size(close_btn, 40, 40);
+        lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -5, 5);
+        lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xffaa4444), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_radius(close_btn, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_add_event_cb(close_btn, help_dialog_close_event_cb, LV_EVENT_CLICKED, NULL);
+        {
+            lv_obj_t * lbl = lv_label_create(close_btn);
+            lv_label_set_text(lbl, LV_SYMBOL_CLOSE);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xffffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_center(lbl);
+        }
+    }
+
+    const char * pin_names[] = {"GND", "+5V", "G53", "G54"};
+    const char * pin_funcs[] = {"GND", "+5V", "RXD", "TXD"};
+    lv_color_t pin_colors[] = {
+        lv_color_hex(0xff000000),
+        lv_color_hex(0xffcc0000),
+        lv_color_hex(0xffcccc00),
+        lv_color_hex(0xffffffff)
+    };
+
+    int32_t rect_w = 120;
+    int32_t rect_h = 60;
+    int32_t spacing = 10;
+
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t * rect = lv_obj_create(dialog);
+        lv_obj_set_size(rect, rect_w, rect_h);
+        lv_obj_align(rect, LV_ALIGN_CENTER, -225 + i * (rect_w + spacing), -30);
+        lv_obj_set_style_bg_color(rect, pin_colors[i], LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(rect, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(rect, lv_color_hex(0xff888888), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_radius(rect, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_clear_flag(rect, LV_OBJ_FLAG_CLICKABLE|LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t * label = lv_label_create(rect);
+        lv_label_set_text(label, pin_names[i]);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_22, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_color_t txt_color = (i == 0) ? lv_color_hex(0xffffffff) : lv_color_hex(0xff000000);
+        lv_obj_set_style_text_color(label, txt_color, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_center(label);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t * rect = lv_obj_create(dialog);
+        lv_obj_set_size(rect, rect_w, rect_h);
+        lv_obj_align(rect, LV_ALIGN_CENTER, -225 + i * (rect_w + spacing), 50);
+        lv_obj_set_style_bg_color(rect, lv_color_hex(0xff444444), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(rect, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(rect, lv_color_hex(0xff888888), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_radius(rect, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_clear_flag(rect, LV_OBJ_FLAG_CLICKABLE|LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t * label = lv_label_create(rect);
+        lv_label_set_text(label, pin_funcs[i]);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_22, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xffffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_center(label);
+    }
+}
+
+static void helpbtn_event_cb(lv_event_t * e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        show_help_dialog();
+    }
+}
 
 static void update_status_led(bool running)
 {
@@ -511,6 +624,29 @@ void create_screen_main() {
                             lv_led_set_color(obj, lv_color_hex(0xffff0000));
                             lv_led_set_brightness(obj, 255);
                             lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+                        }
+                        {
+                            // helpbtn
+                            lv_obj_t *obj = lv_btn_create(parent_obj);
+                            objects.helpbtn = obj;
+                            lv_obj_set_size(obj, 180, 50);
+                            lv_obj_set_style_bg_color(obj, lv_color_hex(0xff2a2a2a), LV_PART_MAIN | LV_STATE_DEFAULT);
+                            lv_obj_set_pos(obj, 300, -15);
+                            lv_obj_add_event_cb(obj, helpbtn_event_cb, LV_EVENT_CLICKED, NULL);
+                            {
+                                // helpbtnlabel
+                                lv_obj_t *parent_obj = obj;
+                                {
+                                    lv_obj_t *obj = lv_label_create(parent_obj);
+                                    objects.helpbtnlabel = obj;
+                                    lv_obj_set_pos(obj, 0, 0);
+                                    lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+                                    lv_obj_set_style_align(obj, LV_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    lv_obj_set_style_text_font(obj, &lv_font_montserrat_28, LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    lv_obj_set_style_text_color(obj, lv_color_hex(0xffffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    lv_label_set_text(obj, "Help");
+                                }
+                            }
                         }
                         {
                             // appname
