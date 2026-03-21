@@ -58,6 +58,20 @@ void uart_change_source(SerialSource source)
     currentSerialSource = source;
 }
 
+void uart_send_data(const uint8_t* data, size_t len)
+{
+    if (currentSerialSource == SERIAL_SOURCE_SERIAL)
+    {
+        Serial.write(data, len);
+        Serial.flush();
+    }
+    else
+    {
+        Serial2.write(data, len);
+        Serial2.flush();
+    }
+}
+
 void uart_init(void)
 {
     uart_queue = xQueueCreate(80, sizeof(uart_data_t));

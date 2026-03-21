@@ -38,5 +38,6 @@ extern SerialSource currentSerialSource;
 void uart_init(void);
 void ui_init(void);
 void uart_change_source(SerialSource source);
+void uart_send_data(const uint8_t* data, size_t len);
 
 #endif
