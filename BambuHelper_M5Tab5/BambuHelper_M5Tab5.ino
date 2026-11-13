@@ -21,11 +21,13 @@
 
 // Lives in src/m5tab5_board.cpp; proves sketch src/ sources are compiled+linked.
 extern const char* m5tab5BoardName();
+extern uint32_t m5tab5AssetFingerprint();
 
 void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println(m5tab5BoardName());
+  Serial.printf("assets=0x%08x\n", m5tab5AssetFingerprint());
   Serial.printf("flash=%u KB  psram=%u KB  screen=%dx%d\n",
                 ESP.getFlashChipSize() / 1024,
                 ESP.getPsramSize() / 1024,

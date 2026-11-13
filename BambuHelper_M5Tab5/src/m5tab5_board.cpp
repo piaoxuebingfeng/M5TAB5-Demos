@@ -17,6 +17,14 @@
 #include "p4_json_allocator.h"
 #include "p4_dashboard_layout.h"
 
+// Stage 2: committed, pre-generated assets. These replace the PlatformIO-only
+// embed_files / extra_scripts mechanisms. web_assets_gz.h is included here for
+// the stage-2 build check and will move to web_server.cpp in a later stage so
+// that only ever one translation unit owns its static arrays.
+#include "p4_sans_fonts.h"
+#include "web_assets_gz.h"
+#include "p4_printer_artwork.h"
+
 // Compile-time guard for the board constants. This file also verifies that
 // arduino-cli recursively compiles sources in the sketch src/ folder, and
 // that a source file can include headers from its own directory.
@@ -27,6 +35,24 @@ static_assert(GT911_SDA == 31 && GT911_SCL == 32 && GT911_INT == 23,
               "Tab5 GT911 pin map");
 static_assert(BOARD_IS_WS_P4_7B == 1, "P4 runtime architecture gate must stay on");
 
+// Asset layer guards: catch an empty or truncated generated blob at build time.
+static_assert(p4SansData_size > 100000, "24px CJK font subset is missing");
+static_assert(p4SansSmallData_size > 80000, "20px CJK font subset is missing");
+static_assert(WEB_APP_CSS_GZ_LEN > 1000 && WEB_APP_JS_GZ_LEN > 1000,
+              "gzipped web assets are missing");
+static_assert(sizeof(p4_art_a1) > 1000, "printer artwork is missing");
+
 const char* m5tab5BoardName() {
-  return "BambuHelper/M5Tab5 stage 1";
+  return "BambuHelper/M5Tab5 stage 2";
+}
+
+// Referencing the generated blobs keeps them in the linked image. A bare
+// static_assert would let --gc-sections discard everything, so this is what
+// actually proves the asset layer fits the board package's 6.5 MB app slot.
+// Each later stage replaces this with the real consumer (fonts.cpp / web_server).
+uint32_t m5tab5AssetFingerprint() {
+  return (uint32_t)p4SansData[0]
+       ^ (uint32_t)p4SansSmallData[0]
+       ^ (uint32_t)WEB_APP_CSS_GZ[0]
+       ^ (uint32_t)p4_art_a1[0];
 }
