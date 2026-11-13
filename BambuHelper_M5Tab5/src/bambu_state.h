@@ -1,0 +1,586 @@
+#ifndef BAMBU_STATE_H
+#define BAMBU_STATE_H
+
+#include <Arduino.h>
+#include <cstdio>
+#include "config.h"
+
+enum ConnMode : uint8_t { CONN_LOCAL = 0, CONN_CLOUD = 1, CONN_CLOUD_ALL = 2 };
+enum CloudRegion : uint8_t { REGION_US = 0, REGION_EU = 1, REGION_CN = 2 };
+enum PrinterGcodeState : uint8_t {
+  GCODE_UNKNOWN = 0,
+  GCODE_IDLE,
+  GCODE_RUNNING,
+  GCODE_PAUSE,
+  GCODE_PREPARE,
+  GCODE_FINISH,
+  GCODE_FAILED,
+  GCODE_OTHER
+};
+
+inline bool isCloudMode(ConnMode m) { return m == CONN_CLOUD || m == CONN_CLOUD_ALL; }
+
+// ── AMS (Automatic Material System) ──────────────────────────────────────────
+// Unit-level data (id / temp / humidity / drying) is kept for more units than
+// tray data. An H2 with 3 AMS 2 Pro + 2 AMS HT reports FIVE units (ids 0, 1, 2,
+// 128, 129); the fifth used to be dropped whole, so a drying AMS HT #2 was
+// invisible - no drying screen, no (x/y) counter, and the display slept through
+// it. Tray slots stay at four: the AMS bars, the AMS gauges (GAUGE_AMS_*_1..4)
+// and the saved gauge-slot values are all built around four groups of four.
+// Units past AMS_TRAY_UNITS still report temp/humidity/drying; their trays are
+// not stored, and the feeding one is captured out-of-band in ovTray below.
+#define AMS_MAX_UNITS      6
+#define AMS_TRAY_UNITS     4
+#define AMS_TRAYS_PER_UNIT 4
+#define AMS_MAX_TRAYS      (AMS_TRAY_UNITS * AMS_TRAYS_PER_UNIT)
+
+// activeTray sentinel: the feeding tray belongs to an AMS unit that didn't
+// fit in units[] (5+ units, e.g. a 2nd AMS HT on H2 series). Tray data is
+// captured out-of-band in AmsState.ovTray so the filament swatch stays
+// correct even though the unit itself isn't displayed.
+#define AMS_TRAY_OVERFLOW  253
+
+struct AmsTray {
+  bool     present;        // tray physically present
+  uint16_t colorRgb565;    // pre-converted for TFT
+  char     type[16];       // "PLA Matte" etc.
+  int8_t   remain;         // 0-100%, -1 = unknown/third-party
+};
+
+struct AmsUnit {
+  bool     present;               // unit detected in MQTT data
+  uint8_t  id;                    // raw id from MQTT (0-3 for AMS2, 128 for AMS HT)
+  uint8_t  humidity;              // 0-5 scale; direction can vary by AMS model/firmware
+  uint8_t  humidityRaw;           // raw RH percent when reported; preferred for display color
+  bool     humidityRawKnown;      // 0% is valid; distinguish it from a missing field
+  float    temp;                  // current temperature inside AMS
+  uint16_t dryRemainMin;          // minutes remaining, 0 = not drying
+  uint16_t dryTotalMin;           // captured at drying start (for progress calc)
+  uint8_t  trayCount;             // actual trays parsed (4 for AMS2, 1 for AMS HT)
+};
+
+inline bool hasAmsHumidityPercent(const AmsUnit& unit) {
+  return unit.humidityRawKnown || unit.humidityRaw > 0;
+}
+
+inline void formatAmsHumidity(char* out, size_t size, const AmsUnit& unit, const char* prefix = "") {
+  if (unit.present && hasAmsHumidityPercent(unit)) snprintf(out, size, "%s%u%%", prefix, unit.humidityRaw);
+  else if (unit.present && unit.humidity > 0) snprintf(out, size, "%sL%u", prefix, unit.humidity);
+  else snprintf(out, size, "%s--", prefix);
+}
+
+// AMS model, resolved from the info.module name prefix (ha-bambulab mapping):
+// ams/N = gen 1, ams_f1/N = Lite, n3f/N = gen 2 (2 / 2 Pro), n3s/N = HT.
+// Humidity fields cannot tell generations apart - a gen-1 unit with fresh
+// desiccant also reports humidity_raw near 0.
+enum AmsModel : uint8_t {
+  AMS_MODEL_NONE = 0,
+  AMS_MODEL_GEN1 = 1,
+  AMS_MODEL_GEN2 = 2,
+  AMS_MODEL_LITE = 3,
+  AMS_MODEL_HT   = 4,
+};
+
+// One info.module[] entry. The name suffix is the raw AMS id from the same
+// snapshot ("ams/0", "n3f/2", "n3s/128"), so it is looked up by that id - never
+// by array position, which changes when the unit list is reordered.
+struct AmsModuleReport {
+  uint8_t id;                     // raw AMS id (0-15 standard, 128+ AMS HT)
+  uint8_t model;                  // AmsModel
+};
+
+struct AmsState {
+  bool     present;               // any AMS data received
+  uint8_t  unitCount;             // detected AMS units (0..AMS_MAX_UNITS)
+  uint8_t  trayUnitCount;         // units that own tray slots (0..AMS_TRAY_UNITS)
+  uint8_t  activeTray;            // 0-15, 253 = overflow unit (see ovTray), 254 = external spool, 255 = none
+  AmsTray  trays[AMS_MAX_TRAYS];  // indexed by unit*4 + trayId (first AMS_TRAY_UNITS units only)
+  AmsUnit  units[AMS_MAX_UNITS];  // unit-level data (indexed sequentially)
+  AmsTray  ovTray;                // feeding tray when activeTray == AMS_TRAY_OVERFLOW
+  uint8_t  ovUnitId;              // raw AMS unit id ovTray was captured from (255 = none)
+  uint8_t  ovTrayId;              // tray id within that unit
+  bool     anyDrying;             // true if any unit has dryRemainMin > 0
+  bool     vtPresent;             // external spool configured
+  uint16_t vtColorRgb565;
+  char     vtType[16];
+  AmsModuleReport module[8];      // info.module self-reports, keyed by raw AMS id
+  uint8_t  moduleCount;
+};
+
+inline const char* amsModelName(uint8_t m) {
+  switch (m) {
+    case AMS_MODEL_GEN1: return "AMS";
+    case AMS_MODEL_GEN2: return "AMS 2";
+    case AMS_MODEL_LITE: return "AMS Lite";
+    case AMS_MODEL_HT:   return "AMS HT";
+    default:             return nullptr;
+  }
+}
+
+// Short generation badge shown next to the unit name. Empty for HT (the name
+// already says it) and for an unreported model - an unknown unit must not be
+// labelled as any generation.
+inline const char* amsModelBadge(uint8_t m) {
+  switch (m) {
+    case AMS_MODEL_GEN1: return "Gen 1";
+    case AMS_MODEL_GEN2: return "2 Pro";
+    case AMS_MODEL_LITE: return "Lite";
+    default:             return nullptr;
+  }
+}
+
+// Drying is a hardware feature, not a reported state: only AMS 2 Pro and AMS HT
+// have a heater (ha-bambulab's AMS_DRYING_MODELS). A gen-1 unit or an AMS Lite
+// must never show a drying countdown, whatever a stale field claims.
+inline bool amsModelCanDry(uint8_t m) {
+  return m == AMS_MODEL_GEN2 || m == AMS_MODEL_HT;
+}
+
+// Model of the unit carrying raw AMS id `id`. AMS HT is structural (id high
+// bit) and needs no module report; a standard unit without one stays NONE.
+inline uint8_t amsModelForUnitId(const AmsState& a, uint8_t id) {
+  if (id >= 128) return AMS_MODEL_HT;
+  for (uint8_t i = 0; i < a.moduleCount && i < 8; i++) {
+    if (a.module[i].id != id) continue;
+    // A module-index collision with an HT report must not relabel a standard unit.
+    return a.module[i].model == AMS_MODEL_HT ? AMS_MODEL_NONE : a.module[i].model;
+  }
+  return AMS_MODEL_NONE;
+}
+
+// ── Printer errors: print.hms + print.print_error ───────────────────────────
+#if HAS_HMS_UI
+
+// Display cap, NOT a protocol bound. Every entry the printer reports is scanned
+// for worst severity and baseline membership; only this many are kept for
+// rendering, sorted by severity then key so a reordered array cannot manufacture
+// a change. hmsOverflow records that the printer sent more than we kept.
+#define HMS_MAX_ENTRIES    8
+
+// Codes already standing when we connect are the printer's baseline: listed,
+// but never alerting. Capped per slot so a pathological printer cannot eat RAM.
+#define HMS_BASELINE_MAX  16
+
+// Suppressed codes kept for /debug. Hiding a code the printer really reported
+// is now a designed behaviour, so it has to be answerable from a diagnostic
+// dump alone - "my printer shows a code and BambuHelper shows none" must not
+// need a USB cable and a serial monitor. Four names the culprits; the serial
+// log still carries every one of them.
+#define HMS_SUPPRESSED_MAX  4
+
+struct HmsEntry {
+  uint32_t attr;   // module in the top byte
+  uint32_t code;   // severity in the high 16 bits
+};
+
+// Severity is the high half of `code`: 1 fatal, 2 serious, 3 common. The live
+// feed also carries one severity-0 code, and Bambu may add more, so anything
+// outside 1-3 is "unknown": listed, never alerting, and ranked below every
+// real severity. Clamped to a byte - real values are single digits.
+inline uint8_t hmsSeverityOf(uint32_t code) {
+  uint32_t sev = code >> 16;
+  return sev > 255 ? 255 : (uint8_t)sev;
+}
+
+// Sort/compare key: 0 = fatal (worst) .. 3 = unknown (loses to everything).
+inline uint8_t hmsSeverityRank(uint32_t code) {
+  uint8_t sev = hmsSeverityOf(code);
+  return (sev >= 1 && sev <= 3) ? (uint8_t)(sev - 1) : (uint8_t)3;
+}
+
+// Full 64-bit lookup key, matching Bambu's 16-hex-char ecode.
+inline uint64_t hmsKeyOf(uint32_t attr, uint32_t code) {
+  return ((uint64_t)attr << 32) | (uint64_t)code;
+}
+
+#endif  // HAS_HMS_UI
+
+// Chamber-light automation flags (PrinterConfig.lightFlags bitmask)
+#define LIGHT_OFF_ON_FINISH 0x01  // turn light off after a successful print
+#define LIGHT_OFF_ON_FAILED 0x02  // turn light off after a failed/cancelled print
+#define LIGHT_ON_AT_START   0x04  // turn light on when a print starts
+
+#define PRINT_MAP_MAX 8
+
+#if defined(BOARD_IS_WS_P4_7B)
+// Presence is independent of value: a reported zero is valid telemetry.
+enum P4Metric : uint32_t {
+  P4_PROGRESS = 1 << 0, P4_REMAINING = 1 << 1,
+  P4_NOZZLE = 1 << 2, P4_NOZZLE_TARGET = 1 << 3,
+  P4_BED = 1 << 4, P4_BED_TARGET = 1 << 5, P4_CHAMBER = 1 << 6,
+  P4_PART_FAN = 1 << 7, P4_AUX_FAN = 1 << 8, P4_CHAMBER_FAN = 1 << 9,
+  P4_NOZZLE_R = 1 << 10, P4_NOZZLE_L = 1 << 11
+};
+#endif
+
+struct BambuState {
+#if defined(BOARD_IS_WS_P4_7B)
+  uint32_t p4Known;
+  float nozzleDiameter;
+  char nozzleType[24];
+  float nozzleDiameterN[2];
+  char nozzleTypeN[2][24];
+#endif
+  bool connected;
+  bool printing;
+  char gcodeState[16];        // RUNNING, PAUSE, FINISH, IDLE, FAILED, PREPARE
+  PrinterGcodeState gcodeStateId;
+  uint8_t progress;           // 0-100%
+  uint16_t remainingMinutes;
+  int8_t stgCur;              // print.stg_cur: -1/255 idle, 0 printing, >0 substage (changing filament, leveling...)
+  float nozzleTemp;
+  float nozzleTarget;
+  float nozzleTempN[2];       // per-nozzle temps when dualNozzle (index = extruder id: 0=right, 1=left)
+  float nozzleTargetN[2];
+  float bedTemp;
+  float bedTarget;
+  float chamberTemp;
+  char subtaskName[128];      // 48 cut before the screen did: a real H2C name measured 47 chars (#187)
+  // print.mapping: one entry per slicer filament the job uses, (amsUnitId<<8)|trayId
+  // (unused 65535 entries dropped, slicer order kept). Cleared when the job name changes.
+  char taskId[24];            // print.task_id of the current/last job ("" = none, "0" = local)
+  uint16_t plateIdx;          // print.plate_idx (1-based plate of that job, 0 = unknown)
+  uint16_t printMap[PRINT_MAP_MAX];
+  uint8_t printMapCount;      // entries stored in printMap
+  uint8_t printMapTotal;      // used entries the printer reported (> count = truncated)
+  bool caliPrintType;         // print_type == "system" (device-initiated calibration job)
+  bool caliSubtask;           // subtask_name ends with "_calib_mode" (Studio calibration wizard job)
+  bool caliGcodeFile;         // gcode_file is a built-in calibration gcode (auto_cali_for_user / extrusion_cali)
+  uint16_t layerNum;
+  uint16_t totalLayers;
+  uint8_t coolingFanPct;      // part cooling fan 0-100%
+  uint8_t auxFanPct;          // aux fan 0-100% (X2D: left aux)
+  uint8_t auxFanRightPct;     // X2D right aux fan 0-100% (from device.airduct.parts[].func==6)
+  uint8_t chamberFanPct;      // chamber fan 0-100%
+  uint8_t exhaustFanPct;      // X2D exhaust fan 0-100% (from device.airduct.parts[].func==2)
+  uint8_t heatbreakFanPct;    // heatbreak fan 0-100%
+  bool fanGearSeen;           // true once printer has reported fan_gear (gates legacy *_fan_speed fallback)
+  uint32_t airductFuncs;      // bitmask of func codes seen in device.airduct.parts[]: bit N = func N reported.
+                              // Used to gate per-fan gauges in the web UI. H2C reports 0/1/2/4;
+                              // X2D reports 0/2/5/6 — checking specific bits is more precise than
+                              // a single "has airduct" boolean.
+  int8_t wifiSignal;          // RSSI in dBm
+  char localIp[16];           // printer LAN IP from pushall print.net.info[].ip (LE uint32), "" if unknown
+  uint8_t speedLevel;         // 1=silent, 2=standard, 3=sport, 4=ludicrous
+  bool dualNozzle;            // H2D/H2C dual extruder detected
+  uint8_t activeNozzle;       // 0=right, 1=left (only when dualNozzle)
+  bool doorOpen;              // door/enclosure open (H2/P2S: stat bit 0x00800000, X1: home_flag bit 23)
+  bool doorSensorPresent;     // true once a door-capable printer has reported its door field
+  unsigned long lastUpdate;       // millis() of last MQTT message (any)
+  unsigned long lastPrintDataMs;  // millis() of last core print data (temps, fans, progress, state)
+  bool finishBuzzerPlayed;    // true after FINISH buzzer played (reset on next print)
+  uint32_t finishEpoch;       // wall-clock time the print finished (epoch secs), 0 = unknown
+  bool finishTimeLatched;     // true once this print's finish has been stamped. Starts SET
+                              // after a state wipe: the first FINISH report from a printer
+                              // that was already done reads as an edge, and stamping that
+                              // would record boot time. Armed by an observed print start.
+  bool doorAcknowledged;      // true after door opened on FINISH screen (print removed)
+  bool bedCooldownAlertArmed; // armed on FINISH transition, fired when bedTemp <= threshold
+  int8_t lightState;          // chamber_light from lights_report: -1 unknown, 0 off, 1 on
+  bool hasSecondLight;        // true if printer reports chamber_light2 (H2C/H2D dual bar)
+  unsigned long lightOffDueMs; // millis() deadline for a scheduled light-off, 0 = none pending
+  unsigned long ctrlCmdSentMs; // millis() of our last control publish (ledctrl), 0 = never.
+                               // Only control commands are authorization-checked (#185)
+#if HAS_HMS_UI
+  uint32_t printError;        // print.print_error, 0 = none
+  bool printErrorSeen;        // a value has been observed on this connection.
+                              // First sight initializes without counting as an
+                              // edge - booting into an error must not alert.
+  HmsEntry hms[HMS_MAX_ENTRIES];  // worst-first, deterministic subset
+  uint8_t  hmsCount;          // entries kept in hms[]
+  uint8_t  hmsTotal;          // described entries the printer reported. Codes
+                              // Bambu ships no wording for are not counted -
+                              // they are dropped before they reach any of this.
+  uint8_t  hmsSuppressed;     // entries dropped by that rule this report. Not a
+                              // display field: it exists so /debug and the
+                              // serial log can answer "the printer says a code
+                              // and BambuHelper shows nothing". See
+                              // hmsIsDescribed() and issue #164.
+  HmsEntry hmsSuppressedCodes[HMS_SUPPRESSED_MAX];  // the first few of them, by
+                              // name rather than by count, for the same reason
+  bool     hmsOverflow;       // hmsTotal > HMS_MAX_ENTRIES
+  uint8_t  hmsWorstSeverity;  // severity of hms[0], 0 = none active. The array
+                              // is sorted worst-first, so the worst entry is
+                              // always hms[0] - no separate index is needed,
+                              // and the truncated tail can never hold anything
+                              // more severe than what was kept.
+  HmsEntry hmsBaseline[HMS_BASELINE_MAX];  // standing codes, never alert
+  uint8_t  hmsBaselineCount;
+  bool     hmsOwnCmdRejected; // standing 0500-0500-0001-0007 is ours, not another
+                              // program's - latched while the code stands (#185)
+  bool     hmsBaselineSaturated;  // more than HMS_BASELINE_MAX standing codes.
+                                  // We can no longer tell a dropped baseline
+                                  // member from a new code, so everything on
+                                  // this slot counts as baseline until the next
+                                  // connect. Suppressing a real alert beats
+                                  // false-alerting on a permanent condition,
+                                  // and a printer standing on 17+ codes is
+                                  // already broken. Logged when it happens.
+#endif
+  AmsState ams;               // AMS tray data
+};
+
+#if HAS_HMS_UI
+// True when (attr, code) was already standing during the connect baseline
+// window - listed on screen and in the portal, but never raises the badge or
+// fires an alert.
+inline bool hmsIsBaseline(const BambuState& s, uint32_t attr, uint32_t code) {
+  if (s.hmsBaselineSaturated) return true;
+  for (uint8_t i = 0; i < s.hmsBaselineCount; i++)
+    if (s.hmsBaseline[i].attr == attr && s.hmsBaseline[i].code == code)
+      return true;
+  return false;
+}
+#endif
+
+inline PrinterGcodeState parsePrinterGcodeState(const char* state) {
+  if (!state || state[0] == '\0') return GCODE_UNKNOWN;
+  if (strcmp(state, "UNKNOWN") == 0) return GCODE_UNKNOWN;
+  if (strcmp(state, "IDLE") == 0) return GCODE_IDLE;
+  if (strcmp(state, "RUNNING") == 0) return GCODE_RUNNING;
+  if (strcmp(state, "PAUSE") == 0) return GCODE_PAUSE;
+  if (strcmp(state, "PREPARE") == 0) return GCODE_PREPARE;
+  if (strcmp(state, "FINISH") == 0) return GCODE_FINISH;
+  if (strcmp(state, "FAILED") == 0) return GCODE_FAILED;
+  return GCODE_OTHER;
+}
+
+inline bool isPrintingGcodeState(PrinterGcodeState state) {
+  return state == GCODE_RUNNING ||
+         state == GCODE_PAUSE ||
+         state == GCODE_PREPARE;
+}
+
+// Human label for print.stg_cur while the printer is RUNNING but not yet laying
+// plastic (changing filament, leveling, heating...). gcode_state stays RUNNING
+// through all of these, so the badge alone reads a bland "RUNNING". Returns NULL
+// for 0 (printing), <0 / 255 (idle) and any stage we don't surface, so callers
+// fall back to the normal ETA line. Covers every non-paused stage: the paused_*
+// stages flip gcode_state to PAUSE (shown by that badge), so their labels would
+// be unreachable here. IDs from BambuStudio / pybambu CURRENT_STAGE_IDS. Labels
+// kept <=18 chars so they fit the 240px ETA line at FONT_BODY without auto-fit.
+inline const char* stgCurLabel(int8_t stg) {
+  switch (stg) {
+    case 1:  return "Bed Leveling";
+    case 2:  return "Preheating Bed";
+    case 3:  return "Sweeping XY";
+    case 4:  return "Changing Filament";
+    case 7:  return "Heating Nozzle";
+    case 8:  return "Calibrating Flow";
+    case 9:  return "Scanning Bed";
+    case 10: return "Inspecting Layer 1";
+    case 11: return "Detecting Plate";
+    case 12:
+    case 18: return "Calibrating Lidar";
+    case 13: return "Homing";
+    case 14: return "Cleaning Nozzle";
+    case 15: return "Checking Temp";
+    case 19: return "Calibrating Flow";
+    case 22: return "Unloading Filament";
+    case 24: return "Loading Filament";
+    case 25:
+    case 31: return "Motor Noise Cali";
+    case 29: return "Cooling Chamber";
+    case 36: return "Accuracy Check";
+    case 37: return "Accuracy Cali";
+    case 38: return "Accuracy Verify";
+    case 39: return "Nozzle Offset Cali";
+    case 40: return "Hot Bed Leveling";
+    case 41: return "Quick Release Chk";
+    case 42: return "Door/Cover Check";
+    case 43: return "Laser Cali";
+    case 44: return "Platform Check";
+    case 45: return "Cam Position Chk";
+    case 46: return "Camera Cali";
+    case 47: return "Bed Leveling 1";
+    case 48: return "Bed Leveling 2";
+    case 49: return "Heating Chamber";
+    case 50: return "Cooling Bed";
+    case 51: return "Cali Lines";
+    case 52: return "Checking Material";
+    case 53: return "Live Cam Cali";
+    case 54: return "Waiting for Bed";
+    case 55: return "Material Pos Chk";
+    case 56: return "Cutter Offset Cali";
+    case 57: return "Measuring Surface";
+    case 58: return "Thermal Precond";
+    case 59: return "Homing Blade";
+    case 60: return "Camera Offset Cali";
+    case 61: return "Blade Pos Cali";
+    case 62: return "Hotend Test";
+    case 63: return "Chamber Temp Wait";
+    case 64: return "Preparing Hotend";
+    case 65: return "Nozzle Clump Cali";
+    case 66: return "Purifying Air";
+    case 67: return "Rotary Measure";
+    case 68: return "Moving to Purge";
+    case 69: return "Cooling Nozzle";
+    case 70: return "Centering Head";
+    case 71: return "Arc Fitting";
+    case 72: return "Hotend Detect";
+    case 73: return "Plate Align Chk";
+    case 74: return "Foreign Object Chk";
+    case 75: return "Bed Underside Chk";
+    case 76: return "Pre-Extruding";
+    case 77: return "Preparing AMS";
+    default: return nullptr;
+  }
+}
+
+// Substage label to show in place of the ETA line: only while RUNNING (prep and
+// mid-print filament swaps), NULL otherwise so the ETA/PAUSE/ERROR ladder wins.
+inline const char* runningStageLabel(const BambuState& s) {
+  if (s.gcodeStateId != GCODE_RUNNING) return nullptr;
+  return stgCurLabel(s.stgCur);
+}
+
+
+// True when the current/last job is a calibration print - either a Bambu
+// Studio calibration wizard job or a device-initiated system calibration.
+// Studio still needs the printer after these finish (to read back / save
+// results), so plug auto-off must not power it down (issue #149).
+inline bool isCalibrationPrint(const BambuState& s) {
+  return s.caliPrintType || s.caliSubtask || s.caliGcodeFile;
+}
+
+// Friendly label for calibration jobs, mapped from the Studio wizard job
+// names (BambuStudio get_calib_mode_name). Returns NULL for normal prints.
+// "retration" is Bambu's own typo in the wizard job name, not ours.
+inline const char* calibrationPrintLabel(const BambuState& s) {
+  if (s.caliSubtask) {
+    const char* n = s.subtaskName;
+    if (strncmp(n, "pa_", 3) == 0 || strncmp(n, "auto_pa_", 8) == 0)
+      return "Flow Dynamics Calibration";
+    if (strncmp(n, "flow_rate_coarse", 16) == 0) return "Flow Rate Calibration (1/2)";
+    if (strncmp(n, "flow_rate_fine", 14) == 0)   return "Flow Rate Calibration (2/2)";
+    if (strncmp(n, "temp_tower", 10) == 0)       return "Temp Tower Calibration";
+    if (strncmp(n, "vol_speed", 9) == 0)         return "Volumetric Speed Calibration";
+    if (strncmp(n, "vfa_", 4) == 0)              return "VFA Calibration";
+    if (strncmp(n, "retration_", 10) == 0)       return "Retraction Calibration";
+    return "Calibration";
+  }
+  if (s.caliPrintType || s.caliGcodeFile) return "Calibration";
+  return NULL;
+}
+
+// Job name for display: friendly calibration label when the job is a
+// calibration print, raw subtask name otherwise.
+inline const char* jobDisplayName(const BambuState& s) {
+  const char* cali = calibrationPrintLabel(s);
+  return cali ? cali : s.subtaskName;
+}
+
+inline void setPrinterGcodeStateRaw(BambuState& state, const char* rawState) {
+  strlcpy(state.gcodeState, rawState ? rawState : "", sizeof(state.gcodeState));
+  state.gcodeStateId = parsePrinterGcodeState(state.gcodeState);
+}
+
+inline void setPrinterGcodeStateCanonical(BambuState& state, PrinterGcodeState gcodeState) {
+  state.gcodeStateId = gcodeState;
+  switch (gcodeState) {
+    case GCODE_IDLE:
+      strlcpy(state.gcodeState, "IDLE", sizeof(state.gcodeState));
+      break;
+    case GCODE_RUNNING:
+      strlcpy(state.gcodeState, "RUNNING", sizeof(state.gcodeState));
+      break;
+    case GCODE_PAUSE:
+      strlcpy(state.gcodeState, "PAUSE", sizeof(state.gcodeState));
+      break;
+    case GCODE_PREPARE:
+      strlcpy(state.gcodeState, "PREPARE", sizeof(state.gcodeState));
+      break;
+    case GCODE_FINISH:
+      strlcpy(state.gcodeState, "FINISH", sizeof(state.gcodeState));
+      break;
+    case GCODE_FAILED:
+      strlcpy(state.gcodeState, "FAILED", sizeof(state.gcodeState));
+      break;
+    case GCODE_OTHER:
+      if (state.gcodeState[0] == '\0') {
+        strlcpy(state.gcodeState, "UNKNOWN", sizeof(state.gcodeState));
+        state.gcodeStateId = GCODE_UNKNOWN;
+      }
+      break;
+    case GCODE_UNKNOWN:
+    default:
+      strlcpy(state.gcodeState, "UNKNOWN", sizeof(state.gcodeState));
+      state.gcodeStateId = GCODE_UNKNOWN;
+      break;
+  }
+}
+
+struct PrinterConfig {
+  ConnMode mode;              // CONN_LOCAL, CONN_CLOUD, or CONN_CLOUD_ALL
+  char ip[16];                // local mode only
+  char serial[20];            // both modes
+  char accessCode[12];        // local mode only
+  char name[24];              // friendly name
+  char cloudUserId[32];       // cloud mode: "u_{uid}" for MQTT username
+  CloudRegion region;          // cloud mode: US, EU, or CN server region
+  uint8_t gaugeSlots[6];       // Standard 2x3 grid - used in every mode.
+  uint8_t landscapeExtras[2];  // Col 4 (top, bot) - landscape 8-slot mode only.
+  uint8_t portraitExtras[3];   // Row 3 (left, mid, right) - portrait 9-slot mode only.
+  bool    amsView;             // 240x240: replace gauge row 2 with AMS strip (per-printer)
+  uint8_t idleSlots[2];        // Ready + Print Complete screens (left, right).
+  uint8_t lightFlags;          // chamber-light automation bitmask (LIGHT_* flags), 0 = all off
+  uint8_t lightOffDelayMin;    // minutes to wait before turning light off (0-60), default 5
+};
+
+struct PrinterSlot {
+  PrinterConfig config;
+  BambuState state;
+};
+
+#if defined(BOARD_IS_WS_P4_7B)
+PrinterSlot* p4UiPrinters();
+uint8_t& p4UiActivePrinterIndex();
+#else
+extern PrinterSlot printers[MAX_PRINTERS];
+extern uint8_t activePrinterIndex;
+#endif
+
+inline PrinterSlot& activePrinter() {
+#if defined(BOARD_IS_WS_P4_7B)
+  return p4UiPrinters()[p4UiActivePrinterIndex()];
+#else
+  return printers[activePrinterIndex];
+#endif
+}
+
+// ── Display rotation (multi-printer) ────────────────────────────────────────
+enum RotateMode : uint8_t {
+  ROTATE_OFF   = 0,   // show only activePrinterIndex
+  ROTATE_AUTO  = 1,   // cycle all connected printers
+  ROTATE_SMART = 2    // prioritize active printers (printing or AMS drying)
+};
+
+struct RotationState {
+  RotateMode mode;
+  uint32_t intervalMs;
+  uint8_t displayIndex;           // which printer slot is currently shown
+  unsigned long lastRotateMs;
+  unsigned long displayHoldUntilMs;  // suppresses Smart snap/rotation so a manually-peeked or freshly-finished slot stays on screen for one interval
+  bool splitEnabled;              // checkbox: show two active printers together (composes with mode)
+  bool splitForce;                // testing checkbox: always split the first two configured slots, ignoring activity
+  uint8_t splitIndexB;            // second printer slot shown in split view (displayIndex is the first)
+};
+
+#if defined(BOARD_IS_WS_P4_7B)
+RotationState& p4UiRotation();
+#else
+extern RotationState rotState;
+#endif
+
+inline PrinterSlot& displayedPrinter() {
+#if defined(BOARD_IS_WS_P4_7B)
+  RotationState& rotation = p4UiRotation();
+  uint8_t idx = rotation.displayIndex < MAX_PRINTERS ? rotation.displayIndex : 0;
+  return p4UiPrinters()[idx];
+#else
+  uint8_t idx = rotState.displayIndex < MAX_PRINTERS ? rotState.displayIndex : 0;
+  return printers[idx];
+#endif
+}
+
+#endif // BAMBU_STATE_H

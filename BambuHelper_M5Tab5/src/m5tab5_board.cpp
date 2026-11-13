@@ -25,6 +25,16 @@
 #include "web_assets_gz.h"
 #include "p4_printer_artwork.h"
 
+// Stage 3: configuration, state and lookup-table layer. This is the first
+// batch of actual BambuHelper definitions (not just board plumbing).
+#include "config.h"
+#include "bambu_state.h"
+#include "settings_types.h"
+#include "timezones.h"
+#include "web_pages.h"
+#include "error_tables/hms_table.h"
+#include "fonts/inter_10.h"
+
 // Compile-time guard for the board constants. This file also verifies that
 // arduino-cli recursively compiles sources in the sketch src/ folder, and
 // that a source file can include headers from its own directory.
@@ -41,9 +51,11 @@ static_assert(p4SansSmallData_size > 80000, "20px CJK font subset is missing");
 static_assert(WEB_APP_CSS_GZ_LEN > 1000 && WEB_APP_JS_GZ_LEN > 1000,
               "gzipped web assets are missing");
 static_assert(sizeof(p4_art_a1) > 1000, "printer artwork is missing");
+static_assert(SCREEN_W == 1024 && SCREEN_H == 600, "stage-3 layout selector");
+static_assert(sizeof(inter_10) > 100, "bitmap font table is missing");
 
 const char* m5tab5BoardName() {
-  return "BambuHelper/M5Tab5 stage 2";
+  return "BambuHelper/M5Tab5 stage 3";
 }
 
 // Referencing the generated blobs keeps them in the linked image. A bare
