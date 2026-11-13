@@ -12,6 +12,11 @@
  * each one verified with a successful compile before it is committed.
  */
 #include <Arduino.h>
+// Core built-in libraries are only added to the include search path when a
+// sketch source references them explicitly. PlatformIO always had them on -I;
+// under Arduino IDE we must name them here so headers that guard with
+// __has_include(<Preferences.h>) resolve correctly in every .cpp.
+#include <Preferences.h>
 #include "src/board_config.h"
 
 // Lives in src/m5tab5_board.cpp; proves sketch src/ sources are compiled+linked.
