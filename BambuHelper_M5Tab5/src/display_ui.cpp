@@ -322,7 +322,29 @@ static bool tickGaugeSmooth(const BambuState& s, bool snap) {
 // ---------------------------------------------------------------------------
 static uint8_t lastAppliedBrightness = 0;
 
-void setBacklight(uint8_t level) {
+// Brightening is ramped, dimming is instant.
+//
+// On the Tab5 the screensaver/clock level is 30 and the daytime level is 200.
+// Leaving the clock screen therefore asked the LEDA driver for a 30 -> 200 step
+// in a single analogWrite, while the same tick was also doing a full fillScreen
+// and a burst of MQTT traffic. That ~450 mA supply step on top of a 5" panel is
+// what trips the brown-out detector when the only source is a 500 mA PC USB
+// port - the symptom is a reboot exactly when tapping the clock screen, with
+// reset_reason=brownout. Spreading the step over ~240 ms removes the edge
+// without changing the steady-state current, which the board already survives.
+//
+// Dimming is left immediate on purpose: it never increases current, and a
+// sleeping panel has to go dark without a visible fade tail.
+#define BACKLIGHT_RAMP_MIN_DELTA 16   // steps smaller than this are not worth ramping
+#define BACKLIGHT_RAMP_STEPS     12   // ~12 * 20 ms = 240 ms to reach the target
+#define BACKLIGHT_RAMP_STEP_MS   20
+
+static uint8_t  backlightTarget = 0;
+static bool     backlightRamping = false;
+static uint32_t backlightRampMs = 0;
+
+// Raw write. Everything else goes through setBacklight()/tickBacklightRamp().
+static void writeBacklightPwm(uint8_t level) {
 #if defined(BACKLIGHT_PIN) && BACKLIGHT_PIN >= 0
   #if defined(BOARD_IS_M5TAB5)
   // Tab5 LEDA driver is active high (M5GFX drives GPIO22 at 44.1 kHz the same
@@ -334,8 +356,38 @@ void setBacklight(uint8_t level) {
   #else
   analogWrite(BACKLIGHT_PIN, level);
   #endif
+#else
+  (void)level;
 #endif
-  lastAppliedBrightness = level;
+}
+
+void setBacklight(uint8_t level) {
+  backlightTarget = level;
+  const int delta = (int)level - (int)lastAppliedBrightness;
+  if (delta <= BACKLIGHT_RAMP_MIN_DELTA) {
+    writeBacklightPwm(level);
+    lastAppliedBrightness = level;
+    backlightRamping = false;
+    return;
+  }
+  // Arm the ramp; tickBacklightRamp() walks it up from appLoop().
+  backlightRamping = true;
+  backlightRampMs = millis() - BACKLIGHT_RAMP_STEP_MS;
+}
+
+void tickBacklightRamp() {
+  if (!backlightRamping) return;
+  const uint32_t now = millis();
+  if (now - backlightRampMs < BACKLIGHT_RAMP_STEP_MS) return;
+  backlightRampMs = now;
+  const int diff = (int)backlightTarget - (int)lastAppliedBrightness;
+  if (diff <= 0) { backlightRamping = false; return; }
+  int step = (diff + BACKLIGHT_RAMP_STEPS - 1) / BACKLIGHT_RAMP_STEPS;
+  if (step < 1) step = 1;
+  if (step > diff) step = diff;
+  lastAppliedBrightness = (uint8_t)(lastAppliedBrightness + step);
+  writeBacklightPwm(lastAppliedBrightness);
+  if (lastAppliedBrightness >= backlightTarget) backlightRamping = false;
 }
 
 static void applyPanelInversion() {

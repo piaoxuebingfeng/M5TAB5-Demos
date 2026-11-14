@@ -140,6 +140,10 @@ void markFrameDirty();
 void setScreenState(ScreenState state);
 ScreenState getScreenState();
 void setBacklight(uint8_t level);
+// Advance the brightening ramp. Call once per appLoop() iteration: setBacklight()
+// only arms the ramp for large upward steps (clock -> dashboard), so without this
+// tick the panel would stay at the old level forever.
+void tickBacklightRamp();
 void applyDisplaySettings();  // re-apply rotation, bg, force redraw
 void triggerDisplayTransition(); // start printer-name overlay on rotation
 void checkNightMode();        // apply scheduled brightness dimming

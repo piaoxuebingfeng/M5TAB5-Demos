@@ -1749,6 +1749,9 @@ void appSetup() {
 }
 
 void appLoop() {
+  // Runs before the splash return below: the boot fade-in arms its ramp while
+  // the splash is still up, so this cannot sit behind that early exit.
+  tickBacklightRamp();
   if (handleSplashPhase()) {
     flushFrame();  // commit splash draws to panel (no-op on non-JC boards)
     return;
