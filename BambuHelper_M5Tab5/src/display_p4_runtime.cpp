@@ -57,7 +57,11 @@ bool tickP4Dashboard() {
   const uint32_t now = millis();
   if (now - lastProgressAnimation < 45) return false;
   lastProgressAnimation = now;
-  drawP4Progress(*tft_ptr, p4ui::CONTENT, p4ui::PROGRESS_Y, p4ui::RIGHT - p4ui::CONTENT,
+  // Partial refresh: the strip is repainted alone on top of the native frame,
+  // so it has to be addressed in PANEL pixels - the same transform
+  // drawP4Dashboard applies to the rest of the composition.
+  drawP4Progress(*tft_ptr, p4ui::sx(p4ui::CONTENT), p4ui::sy(p4ui::PROGRESS_Y),
+                 p4ui::slen(p4ui::RIGHT - p4ui::CONTENT),
                  s.progress, progressPhase(now), accentP4(s));
   return true;
 }
@@ -140,7 +144,13 @@ bool updateP4Dashboard(bool force) {
       !memcmp(&view,&previousView,sizeof(view)) && previousMinute==wall/60 && previousWifiState==wifiState &&
       previousCameraGeneration==cameraGeneration) return false;
   if (!frame.getBuffer()) {
-    frame.setPsram(true); frame.setColorDepth(16); frame.createSprite(1024,600);
+    // The composition is rasterised into PSRAM first and then blitted 1:1 at
+    // (0,0), so this sprite - not the panel - sets the visible area. At the
+    // hardcoded 1024x600 it left a 256px and 120px black border on the Tab5
+    // regardless of what p4ui scaled, because everything past the sprite edge
+    // was simply never drawn.
+    frame.setPsram(true); frame.setColorDepth(16);
+    frame.createSprite(p4ui::W, p4ui::H);
   }
   setFont(tft,FONT_NONE);
   const char* ip = network.ip;

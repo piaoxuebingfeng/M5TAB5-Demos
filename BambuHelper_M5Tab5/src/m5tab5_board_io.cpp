@@ -160,4 +160,27 @@ void m5tab5RadioPower(bool on) {
   }
 }
 
+// INA226 @0x41: bus voltage 1.25 mV/LSB, shunt voltage 2.5 uV/LSB (signed).
+// The part boots in continuous shunt+bus conversion, so no configuration write
+// is needed - which matters, because this is read before anything else runs.
+bool m5tab5ReadPower(float* busVolts, float* shuntMillivolts) {
+  constexpr uint8_t INA226 = 0x41;
+  auto readWord = [](uint8_t addr, uint8_t reg, uint16_t* out) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)addr, 2) != 2) return false;
+    const uint8_t hi = (uint8_t)Wire.read();
+    const uint8_t lo = (uint8_t)Wire.read();
+    *out = (uint16_t)((hi << 8) | lo);
+    return true;
+  };
+  uint16_t bus = 0, shunt = 0;
+  if (!readWord(INA226, 0x02, &bus)) return false;
+  if (!readWord(INA226, 0x01, &shunt)) return false;
+  if (busVolts) *busVolts = bus * 1.25f / 1000.0f;
+  if (shuntMillivolts) *shuntMillivolts = (int16_t)shunt * 0.0025f;
+  return true;
+}
+
 #endif  // BOARD_IS_M5TAB5

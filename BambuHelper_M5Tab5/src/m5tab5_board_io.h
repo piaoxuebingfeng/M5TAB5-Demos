@@ -41,4 +41,10 @@ void m5tab5SpeakerEnable(bool on);     // 0x43 P2, NS4150B amplifier
 void m5tab5CameraReset(bool release);  // 0x43 P6, active low (left released)
 void m5tab5RadioPower(bool on);        // 0x44 P0, ESP32-C6 supply
 
+// INA226 @0x41 on the same system bus, wired across the battery input. Used
+// for brown-out forensics: the Tab5 can drop out seconds into boot, before the
+// application can report anything, so the caller needs a reading it can print
+// straight to the UART. Returns false when the part does not acknowledge.
+bool m5tab5ReadPower(float* busVolts, float* shuntMillivolts);
+
 #endif  // M5TAB5_BOARD_IO_H

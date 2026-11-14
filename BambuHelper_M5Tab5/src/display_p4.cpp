@@ -41,12 +41,76 @@ const Model& modelFor(const PrinterConfig& config) {
   return unknown;
 }
 
+// Every coordinate in this file was authored against the 7B's 1024x600 canvas.
+// The Tab5 panel is 1280x720, so the composition is scaled once here - at the
+// only place pixels reach the panel - instead of re-authoring ~200 hand-tuned
+// positions. p4ui::sx/sy/slen do the mapping; p4ui::ux/uy undo it for hit
+// testing, so a tap still lands on the widget it visually hits. On the 7B the
+// transform is the identity and the generated code is unchanged.
+//
+// Text sizes are deliberately NOT scaled: a VLW face resampled to 1.2x picks up
+// uneven nearest-neighbour steps, and the Tab5's 294ppi panel keeps a native
+// face perfectly readable. Only glyph *positions* scale.
+class ScaledGfx {
+public:
+  lgfx::LovyanGFX& g;
+  explicit ScaledGfx(lgfx::LovyanGFX& target) : g(target) {}
+  lgfx::LovyanGFX& raw() { return g; }
+
+  // Colours MUST stay uint16_t. LovyanGFX dispatches on the argument type:
+  // a uint16_t selects the native RGB565 path, while a uint32_t selects the
+  // RGB888 one and converts a second time - 0x10A2 (the dark background)
+  // comes out as pure blue if it is widened. Keep every signature exact.
+  void fillScreen(uint16_t c) { g.fillScreen(c); }
+  void fillRect(int x, int y, int w, int h, uint16_t c) {
+    g.fillRect(p4ui::sx(x), p4ui::sy(y), p4ui::slen(w), p4ui::slen(h), c);
+  }
+  void fillRoundRect(int x, int y, int w, int h, int r, uint16_t c) {
+    g.fillRoundRect(p4ui::sx(x), p4ui::sy(y), p4ui::slen(w), p4ui::slen(h), p4ui::slen(r), c);
+  }
+  void drawRect(int x, int y, int w, int h, uint16_t c) {
+    g.drawRect(p4ui::sx(x), p4ui::sy(y), p4ui::slen(w), p4ui::slen(h), c);
+  }
+  void drawRoundRect(int x, int y, int w, int h, int r, uint16_t c) {
+    g.drawRoundRect(p4ui::sx(x), p4ui::sy(y), p4ui::slen(w), p4ui::slen(h), p4ui::slen(r), c);
+  }
+  void drawLine(int x0, int y0, int x1, int y1, uint16_t c) {
+    g.drawLine(p4ui::sx(x0), p4ui::sy(y0), p4ui::sx(x1), p4ui::sy(y1), c);
+  }
+  void drawCircle(int x, int y, int r, uint16_t c) {
+    g.drawCircle(p4ui::sx(x), p4ui::sy(y), p4ui::slen(r), c);
+  }
+  void fillCircle(int x, int y, int r, uint16_t c) {
+    g.fillCircle(p4ui::sx(x), p4ui::sy(y), p4ui::slen(r), c);
+  }
+  void drawFastVLine(int x, int y, int h, uint16_t c) {
+    g.drawFastVLine(p4ui::sx(x), p4ui::sy(y), p4ui::slen(h), c);
+  }
+  void startWrite() { g.startWrite(); }
+  void endWrite() { g.endWrite(); }
+  void setClipRect(int x, int y, int w, int h) {
+    g.setClipRect(p4ui::sx(x), p4ui::sy(y), p4ui::slen(w), p4ui::slen(h));
+  }
+  void clearClipRect() { g.clearClipRect(); }
+  void setFont(const lgfx::IFont* f) { g.setFont(f); }
+  void setTextSize(float s) { g.setTextSize(s); }
+  void setTextDatum(lgfx::textdatum_t d) { g.setTextDatum(d); }
+  void setTextColor(uint16_t fg, uint16_t bg) { g.setTextColor(fg, bg); }
+  void setTextWrap(bool w) { g.setTextWrap(w); }
+  void drawString(const char* s, int x, int y) { g.drawString(s, p4ui::sx(x), p4ui::sy(y)); }
+  // Authored width, so callers can keep subtracting it from authored anchors.
+  // uy(), not ux(): ux() maps an absolute panel coordinate and therefore
+  // subtracts UI_OFFSET_X, which made every measured width ~22 authored px too
+  // narrow on the Tab5 - that is what squeezed the "%" of "44%" into the digit.
+  int textWidth(const char* s) { return p4ui::uy(g.textWidth(s)); }
+};
+
 // Select parsed fonts directly; never invalidate display_ui's target-agnostic
 // setFont cache. The caller resets that cache before returning to legacy views.
 class Canvas {
 public:
-  lgfx::LovyanGFX& g;
-  explicit Canvas(lgfx::LovyanGFX& target) : g(target) {}
+  ScaledGfx& g;
+  explicit Canvas(ScaledGfx& target) : g(target) {}
   int text(const char* value, int x, int y, int width, uint16_t color = FG,
            FontID face = FONT_SMALL_2X, float scale = 1, uint16_t background = BG,
            bool middle = false, bool centered = false) {
@@ -83,6 +147,34 @@ public:
     g.setTextDatum(lgfx::textdatum_t::middle_right);
     g.setTextColor(color, background);
     g.drawString(value, x + width, y);
+    const int result = g.textWidth(value);
+    g.setTextSize(1);
+    return result;
+  }
+  // Box height of a face at a given scale, in authored units. middle-anchored
+  // text centres this whole box, so a caller that anchors at the middle needs
+  // it back to find the baseline underneath.
+  int boxHeight(FontID face, float scale) {
+    g.setTextSize(scale);
+    const lgfx::IFont* f = cachedFont(face);
+    g.setFont(f ? f : &lgfx::fonts::Font2);
+    const int h = p4ui::uy(g.raw().fontHeight());
+    g.setTextSize(1);
+    return h;
+  }
+  // Baseline-anchored draw. A small suffix must sit on the big number's
+  // baseline; hanging it off its own descender is what put the "%" of "44%"
+  // into the corner of the digit.
+  int textOnBaseline(const char* value, int x, int baseline, int width,
+                     uint16_t color, FontID face, float scale,
+                     uint16_t background = BG) {
+    if (width <= 0) return 0;
+    g.setTextSize(scale);
+    const lgfx::IFont* f = cachedFont(face);
+    g.setFont(f ? f : &lgfx::fonts::Font2);
+    g.setTextDatum(lgfx::textdatum_t::baseline_left);
+    g.setTextColor(color, background);
+    g.drawString(value, x, baseline);
     const int result = g.textWidth(value);
     g.setTextSize(1);
     return result;
@@ -134,15 +226,20 @@ uint16_t p4ui::p4ProgressPixel(int x, int width, uint32_t phase, uint16_t accent
 }
 void drawP4Progress(lgfx::LovyanGFX& g, int x, int y, int width,
                     uint8_t percent, uint32_t phase, uint16_t accent) {
+  // x/y/width are PANEL pixels (this function also serves the partial-refresh
+  // path in display_p4_runtime.cpp). The strip's own thickness follows the
+  // dashboard scale so it keeps its authored 8px weight on the 7B and 10px on
+  // the Tab5.
+  const int h = p4ui::slen(8), r = p4ui::slen(4), cap = p4ui::slen(4);
   g.startWrite();
-  g.setClipRect(x, y, width, 8);
-  g.fillRoundRect(x, y, width, 8, 4, LINE);
+  g.setClipRect(x, y, width, h);
+  g.fillRoundRect(x, y, width, h, r, LINE);
   const int filled = width * std::min<unsigned>(100, percent) / 100;
   if (filled) {
-    g.fillRoundRect(x, y, filled, 8, 4, accent);
-    const int from = std::min(4, filled), to = std::max(from, filled - 4);
+    g.fillRoundRect(x, y, filled, h, r, accent);
+    const int from = std::min(cap, filled), to = std::max(from, filled - cap);
     for (int px = from; px < to; ++px)
-      g.drawFastVLine(x + px, y, 8, p4ui::p4ProgressPixel(px, filled, phase, accent));
+      g.drawFastVLine(x + px, y, h, p4ui::p4ProgressPixel(px, filled, phase, accent));
   }
   g.clearClipRect();
   g.endWrite();
@@ -223,14 +320,18 @@ void printerPanel(Canvas& cv, const PrinterSlot& p, const P4DashboardView& view,
   // Decode only when the printer model changes; the thumbnail is static.
   static lgfx::LGFX_Sprite art;
   static const Model* artModel = nullptr;
+  // The thumbnail sprite lives in PANEL pixels, so its size - and the fallback
+  // drawing inside it - follows the dashboard scale rather than the authored
+  // 1024x600 geometry.
+  const int artW = p4ui::slen(IMAGE_W), artH = p4ui::slen(IMAGE_CONTENT_H);
   if (artModel != &model || !art.getBuffer()) {
-    if (!art.getBuffer()) { art.setPsram(true); art.setColorDepth(16); art.createSprite(IMAGE_W, IMAGE_CONTENT_H); }
+    if (!art.getBuffer()) { art.setPsram(true); art.setColorDepth(16); art.createSprite(artW, artH); }
     if (art.getBuffer()) {
       art.fillSprite(PAPER);
-      if (model.png) art.drawPng(model.png, model.bytes, 0, 0, IMAGE_W, IMAGE_CONTENT_H, 0, 0, 0, 0, lgfx::datum_t::middle_center);
+      if (model.png) art.drawPng(model.png, model.bytes, 0, 0, artW, artH, 0, 0, 0, 0, lgfx::datum_t::middle_center);
       else {
-        art.drawRoundRect(82,8,96,130,7,DIM);
-        art.drawRect(92,30,76,96,DIM);
+        art.drawRoundRect(p4ui::slen(82), p4ui::slen(8), p4ui::slen(96), p4ui::slen(130), p4ui::slen(7), DIM);
+        art.drawRect(p4ui::slen(92), p4ui::slen(30), p4ui::slen(76), p4ui::slen(96), DIM);
       }
       artModel = &model;
     }
@@ -239,7 +340,7 @@ void printerPanel(Canvas& cv, const PrinterSlot& p, const P4DashboardView& view,
 #if defined(P4_CLOUD_CAMERA_EXPERIMENTAL)
   if(view.showCamera){
     showPrinter=false;
-    if(!drawP4Camera(cv.g,p,IMAGE_X,IMAGE_Y)) {
+    if(!drawP4Camera(cv.g.raw(),p,p4ui::sx(IMAGE_X),p4ui::sy(IMAGE_Y))) {
       cv.text(p4CameraBusy()?"正在获取实景":"实景暂未就绪",LEFT+PANEL_W/2,
               IMAGE_Y+IMAGE_CONTENT_H/2,IMAGE_W,DIM,FONT_P4_CN_SMALL,1,PAPER,true,true);
     }
@@ -264,7 +365,7 @@ void printerPanel(Canvas& cv, const PrinterSlot& p, const P4DashboardView& view,
     cv.text(line,LEFT+PANEL_W/2-10,IMAGE_META_Y,IMAGE_W,DIM,FONT_P4_CN_SMALL,1,PAPER,true,true);
   }
 #endif
-  if(showPrinter&&art.getBuffer())art.pushSprite(&cv.g,IMAGE_X,IMAGE_Y);
+  if(showPrinter&&art.getBuffer())art.pushSprite(&cv.g.raw(),p4ui::sx(IMAGE_X),p4ui::sy(IMAGE_Y));
   // Contain both sources in a fixed viewport. Neither switching nor the
   // source aspect ratio can move the dots or any of the information rows.
   constexpr int dotsY=IMAGE_DOTS_Y;
@@ -343,8 +444,22 @@ void job(Canvas& cv, const PrinterSlot& p, time_t now, bool networkOnline, uint3
 #endif
   char b[64];
   if (known(s, P4_PROGRESS)) snprintf(b, sizeof(b), "%u", std::min<unsigned>(100, s.progress)); else snprintf(b, sizeof(b), "—");
-  int width = cv.text(b,CONTENT-3,176,226,FG,FONT_P4_PROGRESS,.95f,BG,true);
-  if (known(s, P4_PROGRESS)) cv.text("%",CONTENT+width,202,45,accent(s),FONT_BODY_2X,1.15f,BG,true);
+  // The number is middle-anchored, the "%" hangs off its baseline. The two
+  // faces are ~76 px and ~24 px tall here, so the suffix used to be placed
+  // from the advance width alone and landed 2 px from the digit's stem; PCT_GAP
+  // is the authored air between them, and the baseline is measured instead of
+  // guessed so the pair stays aligned on the 7B's 1:1 canvas as well.
+  constexpr int PCT_Y = 176, PCT_GAP = 6;
+  // Every P4 face is an Inter subset, so the ascent/descent split is the same
+  // across them (109/28 at the progress face): 28/137 of the box sits below the
+  // baseline. That converts a middle-anchored box into the baseline the suffix
+  // has to hang from - ink bottom, not box bottom, which is 13 px lower here.
+  constexpr float BASELINE_FROM_MIDDLE = 0.2956f;
+  const int width = cv.text(b,CONTENT-3,PCT_Y,226,FG,FONT_P4_PROGRESS,.95f,BG,true);
+  if (known(s, P4_PROGRESS))
+    cv.textOnBaseline("%",CONTENT-3+width+PCT_GAP,
+                      PCT_Y + (int)(cv.boxHeight(FONT_P4_PROGRESS,.95f) * BASELINE_FROM_MIDDLE),
+                      45,accent(s),FONT_BODY_2X,1.15f);
   cv.text("打印进度",CONTENT,238,190,MUTED,FONT_P4_CN_SMALL,1,BG,true);
   cv.text("预计剩余",608,142,220,MUTED,FONT_P4_CN_SMALL,1,BG,true);
   if (known(s, P4_REMAINING) && s.printing) duration(b, sizeof(b), s.remainingMinutes); else snprintf(b, sizeof(b), "—");
@@ -358,7 +473,7 @@ void job(Canvas& cv, const PrinterSlot& p, time_t now, bool networkOnline, uint3
   if (s.totalLayers) snprintf(b, sizeof(b), "%u", s.layerNum); else snprintf(b, sizeof(b), "—");
   cv.text(b,848,188,154,FG,FONT_P4_VALUE,1,BG,true);
   if (s.totalLayers) { snprintf(b, sizeof(b), "/ %u 层", s.totalLayers); cv.text(b,850,234,152,MUTED,FONT_P4_CN_SMALL,1,BG,true); }
-  drawP4Progress(cv.g,CONTENT,PROGRESS_Y,RIGHT-CONTENT,
+  drawP4Progress(cv.g.raw(),p4ui::sx(CONTENT),p4ui::sy(PROGRESS_Y),p4ui::slen(RIGHT-CONTENT),
                  known(s,P4_PROGRESS)?s.progress:0,progressPhase,accent(s));
   const bool chamber = modelFor(p.config).chamber || known(s,P4_CHAMBER);
   const int count = (s.dualNozzle ? 3 : 2) + (chamber ? 1 : 0), step = (RIGHT-CONTENT)/count;
@@ -622,7 +737,17 @@ P4Action p4DashboardGesture(P4DashboardView& v,const BambuState& s,p4ui::Gesture
   return P4Action::None;
 }
 void drawP4Dashboard(lgfx::LovyanGFX& g,const PrinterSlot& p,const P4DashboardView& v,time_t now,const char* deviceIp,bool networkOnline,uint32_t progressPhase) {
-  Canvas cv(g); g.fillScreen(BG); g.setTextWrap(false);
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    Serial.printf("[p4draw] target=%dx%d W=%d H=%d mul=%d/%d off=%d sx1024=%d sy600=%d\n",
+                  (int)g.width(), (int)g.height(), p4ui::W, p4ui::H,
+                  p4ui::UI_MUL, p4ui::UI_DIV, p4ui::UI_OFFSET_X,
+                  p4ui::sx(1024), p4ui::sy(600));
+  }
+  ScaledGfx scaled(g);
+  Canvas cv(scaled);
+  cv.g.fillScreen(BG); scaled.setTextWrap(false);
   header(cv,p,v,now,deviceIp);
   if(v.page<0) { printerPanel(cv,p,v,now); job(cv,p,now,networkOnline,progressPhase); ams(cv,p.state,v.amsPage,CONTENT,AMS_Y,RIGHT-CONTENT,false); }
   else details(cv,p,v,now,deviceIp,networkOnline);

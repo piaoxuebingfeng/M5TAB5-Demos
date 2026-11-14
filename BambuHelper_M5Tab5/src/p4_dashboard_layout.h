@@ -4,7 +4,42 @@
 // Native 7B canvas. Shared by drawing and hit testing, including host previews.
 namespace p4ui {
 constexpr uint16_t PANEL_BACKGROUND = 0xef7e;  // #eceff1 in RGB565.
+
+// Every coordinate in this file is authored against the 7B's 1024x600 canvas.
+// The Tab5 panel is 1280x720, so instead of re-authoring ~200 hand-tuned pixel
+// positions we scale the whole composition once, at the draw call boundary
+// (see ScaledGfx in display_p4.cpp). 1024*6/5 = 1228, which leaves 26px of
+// same-colour background on each side - visually indistinguishable from full
+// bleed, and it keeps circles round: a 1.25/1.2 non-uniform stretch would turn
+// every gauge and the gear icon into ellipses.
+#if defined(BOARD_IS_M5TAB5)
+constexpr int W = 1280, H = 720;
+constexpr int UI_MUL = 6, UI_DIV = 5;    // 1.2x
+constexpr int UI_OFFSET_X = 26;          // (1280 - 1228) / 2
+#else
 constexpr int W = 1024, H = 600;
+constexpr int UI_MUL = 1, UI_DIV = 1;
+constexpr int UI_OFFSET_X = 0;
+#endif
+constexpr int BASE_W = 1024, BASE_H = 600;
+
+// Authored (canvas) coordinates -> panel pixels.
+inline int slen(int v) {
+  return v >= 0 ? (v * UI_MUL + UI_DIV / 2) / UI_DIV
+                : -((-v * UI_MUL + UI_DIV / 2) / UI_DIV);
+}
+inline int sx(int v) { return UI_OFFSET_X + slen(v); }
+inline int sy(int v) { return slen(v); }
+// Panel pixels -> authored coordinates, for hit testing.
+inline int ux(int px) {
+  const int v = px - UI_OFFSET_X;
+  return v >= 0 ? (v * UI_DIV + UI_MUL / 2) / UI_MUL
+                : -((-v * UI_DIV + UI_MUL / 2) / UI_MUL);
+}
+inline int uy(int py) {
+  return py >= 0 ? (py * UI_DIV + UI_MUL / 2) / UI_MUL
+                 : -((-py * UI_DIV + UI_MUL / 2) / UI_MUL);
+}
 constexpr int LEFT = 22, TOP = 76, PANEL_W = 326, PANEL_H = 510;
 constexpr int CONTENT = 378, RIGHT = 1002, AMS_Y = 407;
 constexpr int PROGRESS_Y = 266;
@@ -25,7 +60,8 @@ inline bool imageContains(Point p) {
          p.y >= IMAGE_Y && p.y < IMAGE_Y + IMAGE_H;
 }
 inline bool homeAmsContains(Point p) {
-  return p.x >= CONTENT && p.x < RIGHT && p.y >= AMS_Y && p.y < H;
+  // Authored bounds, not the panel size: hit points are un-scaled by ux/uy.
+  return p.x >= CONTENT && p.x < RIGHT && p.y >= AMS_Y && p.y < BASE_H;
 }
 // Verified on the 7B: GT911 coordinates already match the mounted display at
 // user rotation 0 (e.g. a gear tap reports x=989, y=42). Only the optional
@@ -43,8 +79,11 @@ inline bool homeAmsContains(Point p) {
 #if defined(BOARD_IS_M5TAB5)
 constexpr int RAW_W = 720, RAW_H = 1280;
 inline Point touchPoint(int x, int y, uint8_t rotation) {
-  return (rotation & 2) ? Point{y, RAW_W - 1 - x}     // hardware rotation 1
-                        : Point{RAW_H - 1 - y, x};    // hardware rotation 3
+  const Point panel = (rotation & 2) ? Point{y, RAW_W - 1 - x}   // hardware rotation 1
+                                     : Point{RAW_H - 1 - y, x};  // hardware rotation 3
+  // Hit testing compares against authored coordinates, so undo the 1.2x the
+  // draw boundary applies (ux/uy are identity on the 7B).
+  return Point{ux(panel.x), uy(panel.y)};
 }
 #else
 inline Point touchPoint(int x, int y, uint8_t rotation) {

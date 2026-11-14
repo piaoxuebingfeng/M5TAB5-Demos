@@ -6344,6 +6344,12 @@ bool screenCaptureBegin(const uint16_t** buf, int16_t* w, int16_t* h) {
   g_shot->setPsram(true);
   g_shot->setColorDepth(16);
   if (!g_shot->createSprite(sw, sh)) { delete g_shot; g_shot = nullptr; return false; }
+  // The BMP writer assumes a 16-bit, byte-swapped buffer. Prove it rather than
+  // trusting setColorDepth() - a 24-bit sprite here silently turns every
+  // screenshot into garbled colours and a 2/3-width frame.
+  Serial.printf("[shot] panel=%dx%d sprite=%dx%d depth=%u buf=%d\n",
+                (int)sw, (int)sh, (int)g_shot->width(), (int)g_shot->height(),
+                (unsigned)g_shot->getColorDepth(), (int)(g_shot->getBuffer() != nullptr));
   tft.waitDMA();
   g_shot->setTextDatum(tft.getTextDatum());
   g_shotPrev = tft_ptr;
