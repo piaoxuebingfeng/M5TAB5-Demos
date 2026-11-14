@@ -1,0 +1,74 @@
+#ifndef FONTS_H
+#define FONTS_H
+
+#include "LovyanGFX.hpp"
+
+// Smooth VLW font identifiers - values match the old bitmap font numbers
+// so existing logic (e.g. compact ? FONT_LARGE : FONT_LARGE) stays readable.
+enum FontID : uint8_t {
+    FONT_NONE   = 0,
+    FONT_SMALL  = 1,   // Inter 10pt  (was bitmap Font 1, 8px GLCD)
+    FONT_BODY   = 2,   // Inter 14pt  (was bitmap Font 2, 16px)
+    FONT_LARGE  = 4,   // Inter 19pt  (was bitmap Font 4, 26px)
+    FONT_XLARGE = 5,   // Inter 22pt - only loaded on DISPLAY_320x480; on
+                       // other boards setFont(FONT_XLARGE) silently falls
+                       // back to FONT_LARGE (the inter_22 blob isn't linked).
+    FONT_7SEG   = 7,   // Built-in 7-segment (kept for clock displays)
+    // True 2x tier, linked only on DISPLAY_ROUND_480. Elsewhere setFont()
+    // falls back to the 1x face of the same rank - never to the default:
+    // branch, which would leave whatever built-in font was last active.
+    FONT_SMALL_2X = 8,   // Inter 20pt / 24 px
+    FONT_BODY_2X  = 9,   // Inter 27pt / 32 px
+    FONT_LARGE_2X = 10,  // Inter 37pt / 44 px
+    // Card print screen, linked only when HAS_CARD_SKIN. Elsewhere they fall
+    // back to FONT_LARGE / FONT_SMALL.
+    FONT_CARD_NUM = 11,  // Inter Bold 60 px, digits + " -.:" only
+    FONT_CARD_LBL = 12,  // Inter Bold 10 px, ASCII + degree + middot
+    // 1.5x Card tier, DISPLAY_320x480 boards with HAS_CARD_SKIN only.
+    FONT_CARD_NUM_L = 13,  // Inter Bold 72 px, digits + " -.:"
+    FONT_CARD_LBL_L = 14,  // Inter Bold 14 px, ASCII + degree + middot
+    // Card temperature grid, DISPLAY_240x320 boards with HAS_CARD_SKIN only.
+    // Elsewhere it falls back to FONT_LARGE.
+    FONT_CARD_MID = 15,  // Inter Bold 32 px, digits + " -.:"
+    FONT_CJK = 16,      // P4: antialiased Chinese printer/task names, 24px
+    FONT_P4_CN_SMALL = 17,
+    FONT_P4_PROGRESS = 18,
+    FONT_P4_VALUE = 19,
+    FONT_P4_DURATION = 20,
+};
+
+// Sets the active font. Caches the last selection - calling setFont() repeatedly
+// with the same id is a no-op. If a VLW font fails to load (e.g. heap exhausted)
+// the helper falls back to a built-in bitmap font of similar height instead of
+// silently leaving the previous font (or Font0) selected.
+// Note: parameter is named `gfx` (not `tft`) because display_ui.h defines
+// a `#define tft (*tft_ptr)` macro for the JC3248W535 sprite redirection,
+// which would otherwise mangle this declaration when both headers are
+// included in the same translation unit.
+void setFont(lgfx::LovyanGFX& gfx, FontID id);
+
+inline bool needsCjkFont(const char* text) {
+#if defined(DISPLAY_1024x600)
+    for (const unsigned char* p = (const unsigned char*)text; *p; ++p)
+        if (*p >= 0xE0 && *p <= 0xEF) return true;
+#endif
+    return false;
+}
+
+inline void setFontForText(lgfx::LovyanGFX& gfx, const char* text, FontID fallback) {
+    setFont(gfx, needsCjkFont(text) ? FONT_CJK : fallback);
+}
+
+// Load a VLW font into an arbitrary render target (e.g. an LGFX_Sprite),
+// bypassing setFont()'s last-selection cache — that cache tracks the main
+// panel only and would skip the load on a second target. Returns false when
+// the id has no VLW blob (FONT_7SEG / FONT_NONE) or the load fails.
+bool loadFontInto(lgfx::LovyanGFX& gfx, FontID id);
+
+// Parsed once and kept (~9 B per glyph): select with gfx.setFont(cachedFont(id)).
+// For renderers that switch faces many times per frame. Null when unavailable.
+const lgfx::IFont* cachedFont(FontID id);
+// Frees every cachedFont() face. No gfx may still have one selected.
+void releaseCachedFonts();
+
+#endif // FONTS_H

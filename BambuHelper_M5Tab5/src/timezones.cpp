@@ -1,3 +1,7 @@
+// Board macro matrix. Arduino IDE has no global -D injection, so every
+// translation unit pulls it in first (see board_config.h for the rationale).
+#include "board_config.h"
+
 #include "timezones.h"
 
 // POSIX TZ format: STDoffsetDST[offset],start[/time],end[/time]

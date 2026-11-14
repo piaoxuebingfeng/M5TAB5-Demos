@@ -24,7 +24,12 @@
 #define M5TAB5_BACKLIGHT_PIN 22
 
 // --- Identity -------------------------------------------------------------
+// These three were -D string macros in boards/ws_p4_lcd_7b.ini. Quoted macros
+// are error-prone in boards.local.txt, so they live here as plain #defines.
 #define BOARD_IS_M5TAB5 1
+#define BOARD_NAME "M5Stack_Tab5"
+#define BOARD_PANEL "ILI9881C_1280x720_GT911"
+#define BOARD_VARIANT "m5tab5"
 
 // NOT a board pin switch - this is the ESP32-P4 runtime architecture gate
 // (SPSC snapshot, worker ownership, PSRAM allocation policy, loop() fork).

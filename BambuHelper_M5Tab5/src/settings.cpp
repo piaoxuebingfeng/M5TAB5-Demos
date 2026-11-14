@@ -1,0 +1,1636 @@
+// Board macro matrix. Arduino IDE has no global -D injection, so every
+// translation unit pulls it in first (see board_config.h for the rationale).
+#include "board_config.h"
+
+#define P4_SETTINGS_NO_ALIAS
+#include "settings.h"
+#if defined(BOARD_IS_WS_P4_7B)
+#include "p4_ui_state.h"
+#endif
+#include "config.h"
+#include "button.h"
+#include "buzzer.h"
+#include "led.h"
+#include "timezones.h"
+#include "cloud_login.h"   // CLOUD_TOKEN_MAX - the one size every token path shares
+#include <Preferences.h>
+#include <nvs.h>           // nvs_get_stats for the storage-usage diagnostics
+#include "esp_ota_ops.h"   // running-slot label for recordBootSlotVersion()
+#include <cstring>   // memcpy/memmove/strlcpy used by the UTF-8 sanitizer helpers
+#if defined(BOARD_IS_WS_P4_7B)
+#include "p4_checked_preferences.h"
+#include "p4_storage_commit.h"
+#include <esp_heap_caps.h>
+#endif
+// Global state
+#if defined(BOARD_IS_WS_P4_7B)
+P4UiSettings p4Settings;
+#define P4_SETTINGS_OWNER p4Settings
+#include "p4_legacy_aliases.h"
+#else
+PrinterSlot printers[MAX_PRINTERS];
+uint8_t activePrinterIndex = 0;
+RotationState rotState = { ROTATE_SMART, ROTATE_INTERVAL_MS, 0, 0, 0, false, 1 };
+char wifiSSID[33] = {0};
+char wifiPass[65] = {0};
+uint8_t brightness = 200;
+DisplaySettings dispSettings;
+GaugeLabels gaugeLabels;
+NetworkSettings netSettings;
+DisplayPowerSettings dpSettings;
+ButtonType buttonType = BTN_DISABLED;
+uint8_t buttonPin = BUTTON_DEFAULT_PIN;
+BuzzerSettings buzzerSettings = { false, BUZZER_DEFAULT_PIN, 0, 0, false, false, 35 };
+LedSettings ledSettings = {
+  /*enabled*/             false,
+  /*pin*/                 LED_DEFAULT_PIN,
+  /*brightness*/          128,
+  /*finishMode*/          LED_FINISH_OFF,
+  /*finishSeconds*/       60,
+  /*finishBrightness*/    255,
+  /*autoOnWhilePrinting*/ false,
+  /*pauseBreathing*/      false,
+  /*errorStrobe*/         false,
+  /*errorStrobeSeconds*/  LED_ERROR_STROBE_DEFAULT_S,
+  /*driver*/              LED_DRV_SINGLE,
+  /*pinG*/                ONBOARD_RGB_G_PIN,
+  /*pinB*/                ONBOARD_RGB_B_PIN,
+  /*commonAnode*/         ONBOARD_RGB_ANODE != 0,
+  /*colorIdle*/           LED_COLOR_IDLE_DEFAULT,
+  /*colorPrinting*/       LED_COLOR_PRINTING_DEFAULT,
+  /*colorPaused*/         LED_COLOR_PAUSED_DEFAULT,
+  /*colorFinished*/       LED_COLOR_FINISHED_DEFAULT,
+  /*colorError*/          LED_COLOR_ERROR_DEFAULT,
+  /*nightOff*/            false,
+};
+TasmotaSettings tasmotaSettings[TASMOTA_PLUG_COUNT] = {};
+float tasmotaTariffPerKwh = 0.0f;
+char tasmotaCurrency[8] = "\xE2\x82\xAC";  // "€" UTF-8 default
+
+// Experimental: opt-in 2-printer mode on BOARD_LOW_RAM. Local-only -
+// NOT included in /settings/export to avoid propagating an unsafe mode
+// across devices via JSON backup.
+bool dualPrinterUnsafe = false;
+
+// Experimental: opt-in 4-printer mode on BOARD_HAS_PSRAM boards. Default off,
+// so PSRAM boards stay at the long-standing 2-printer behavior unless the user
+// ticks the Advanced toggle. Local-only - NOT exported (same reason as above).
+bool quadPrinterBeta = false;
+
+// C3 antenna workaround (issue #146): persisted marker that this board's radio
+// only communicates reliably at reduced TX power. Written by wifi_manager once
+// a capped STA attempt succeeds after full-power attempts failed. Local-only -
+// NOT exported (hardware property of this specific board, not a preference).
+bool wifiTxCapped = false;
+#endif
+
+// Boot reads before workers start; afterwards the P4 HTTP/NVS owner is the
+// only task that calls this module. Other tasks receive immutable snapshots.
+#if defined(BOARD_IS_WS_P4_7B)
+static P4CheckedPreferences<Preferences> prefs;
+#else
+static Preferences prefs;
+#endif
+
+// ---------------------------------------------------------------------------
+//  RGB565 <-> HTML hex conversion
+// ---------------------------------------------------------------------------
+uint16_t htmlToRgb565(const char* hex) {
+  if (!hex || hex[0] == '\0') return 0;
+  // Skip '#' if present
+  if (hex[0] == '#') hex++;
+  uint32_t rgb = strtoul(hex, nullptr, 16);
+  uint8_t r = (rgb >> 16) & 0xFF;
+  uint8_t g = (rgb >> 8) & 0xFF;
+  uint8_t b = rgb & 0xFF;
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+uint16_t bambuColorToRgb565(const char* rrggbbaa) {
+  if (!rrggbbaa || strlen(rrggbbaa) < 6) return 0;
+  uint32_t rgba = strtoul(rrggbbaa, nullptr, 16);
+  // RRGGBBAA: shift depends on length (6 = RRGGBB, 8 = RRGGBBAA)
+  uint8_t r, g, b;
+  if (strlen(rrggbbaa) >= 8) {
+    r = (rgba >> 24) & 0xFF;
+    g = (rgba >> 16) & 0xFF;
+    b = (rgba >> 8) & 0xFF;
+  } else {
+    r = (rgba >> 16) & 0xFF;
+    g = (rgba >> 8) & 0xFF;
+    b = rgba & 0xFF;
+  }
+
+  // --- Saturation & Brightness Boost ---
+  // Bambu Lab's MQTT hex colors are often extremely pastel (washed out),
+  // causing CYD TFT displays to render them with an ugly dithered look.
+  // We boost saturation by pulling the lowest RGB value closer to 0.
+  uint8_t max_val = r;
+  if (g > max_val) max_val = g;
+  if (b > max_val) max_val = b;
+  
+  uint8_t min_val = r;
+  if (g < min_val) min_val = g;
+  if (b < min_val) min_val = b;
+
+  // Near-black filaments: Bambu reports "black" spools as ~#161616, not pure
+  // #000000. The residual RGB565 value (0x10A2) renders as true black on IPS
+  // panels (jc3248w535) but as a visible dark grey on ST7789 panels
+  // (ws_lcd_200, CYD). Snap near-black to pure black so it looks black on every
+  // panel. Done before the boosts so it can't be re-lightened.
+  if (max_val < 32) return 0x0000;
+
+  if (max_val > 0 && max_val > min_val) {
+    // Avoid blowing out almost-grey colors (like silver/grey filaments)
+    // Only boost if there is a distinct color (saturation > 10%)
+    if ((max_val - min_val) > (max_val / 10)) {
+       float scale = (float)max_val / (max_val - min_val);
+       float full_r = (r - min_val) * scale;
+       float full_g = (g - min_val) * scale;
+       float full_b = (b - min_val) * scale;
+
+       // Blend 65% towards fully saturated color to make it pop
+       float blend = 0.65f;
+       r = (uint8_t)(r + (full_r - r) * blend);
+       g = (uint8_t)(g + (full_g - g) * blend);
+       b = (uint8_t)(b + (full_b - b) * blend);
+    }
+  }
+
+  // Boost global brightness so pastel colors pop, but preserve intentionally
+  // dark filaments (black, dark grey). Below this threshold we leave the
+  // color alone - inflating r=g=b=10 to ~220 turned black filaments near-white.
+  if (max_val >= 32 && max_val < 220) {
+    float b_scale = 220.0f / max_val;
+    r = (uint8_t)(r * b_scale);
+    g = (uint8_t)(g * b_scale);
+    b = (uint8_t)(b * b_scale);
+  }
+
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+void rgb565ToHtml(uint16_t c, char* buf) {
+  uint8_t r = ((c >> 11) & 0x1F) * 255 / 31;
+  uint8_t g = ((c >> 5) & 0x3F) * 255 / 63;
+  uint8_t b = (c & 0x1F) * 255 / 31;
+  snprintf(buf, 8, "#%02X%02X%02X", r, g, b);
+}
+
+void sanitizeHostname(const char* in, char* out, size_t outSize) {
+  if (outSize == 0) return;
+  size_t n = 0;
+  for (const char* p = in; *p && n < outSize - 1; p++) {
+    char c = *p;
+    if (c >= 'A' && c <= 'Z') c += 32;  // tolower
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') out[n++] = c;
+  }
+  out[n] = '\0';
+  // Strip leading/trailing hyphens (invalid as DNS label boundaries).
+  size_t start = 0;
+  while (out[start] == '-') start++;
+  if (start > 0) memmove(out, out + start, strlen(out + start) + 1);
+  size_t len = strlen(out);
+  while (len > 0 && out[len - 1] == '-') out[--len] = '\0';
+  if (out[0] == '\0') strlcpy(out, "bambuhelper", outSize);
+}
+
+// ---------------------------------------------------------------------------
+//  Default display settings (matches original config.h colors)
+// ---------------------------------------------------------------------------
+void defaultDisplaySettings(DisplaySettings& ds) {
+  ds.rotation = 0;
+  ds.bgColor = CLR_BG;
+  ds.trackColor = CLR_TRACK;
+  ds.progressBarColor = CLR_GREEN;
+  ds.animatedBar = true;
+  ds.pongClock = false;
+  ds.smallLabels = false;
+  ds.timeDisplayMode = 0;      // ETA (wall-clock finish time)
+  ds.fanMatchPrinter = true;
+  ds.invertColors = false;
+  ds.cydPanelClassic = false;
+  ds.cyd32eVariant = false;
+  ds.roundSkin = 0;
+#if defined(DISPLAY_1024x600)
+  ds.cardStyle = 1;  // big screen starts with task name, AMS and temperatures
+#else
+  ds.cardStyle = 0;
+#endif
+  ds.cardLeft = 0;
+  ds.cardBottom = 0;
+  ds.cardReady = 0;
+  ds.landscape8Slots = false;
+  ds.portrait9Slots = false;
+  ds.clockTimeColor = CLR_TEXT_DEFAULT;
+  ds.clockDateColor = CLR_TEXT_DIM_DEFAULT;
+  ds.clockTimeSize = 0;        // Auto
+  ds.clockDateSize = 0;        // Auto (match time size)
+  ds.hideClockDate = false;
+  ds.showClockInfo = false;
+  ds.amsTrayTypes = true;       // default ON: preserves existing per-tray labels
+  ds.buttonPowerControl = false;  // #136: default OFF (opt-in per device)
+  ds.gestTap = GT_SMART;
+  ds.gestDouble = GD_OFF;
+  ds.gestHold = GH_LED;
+  ds.showBatteryIndicator = false;  // default OFF on all boards; enable per device
+  ds.glowMode = 0;             // edge glow off
+  ds.glowColor = CLR_GREEN;
+  ds.glowStyle = 0;            // Sweep
+  ds.glowDuration = 0;         // Burst
+#if HAS_HMS_UI
+  ds.hmsEnabled = true;        // printer errors on by default - the whole point
+  ds.hmsSeverityAll = false;   // important only: severity 1+2
+  ds.hmsAlertMask = 0;         // opt in to buzzer/glow/LED/wake individually
+  ds.hmsAutoPresent = 0;       // badge only; the screen is a deliberate tap
+  ds.hmsLookupOnline = true;   // the config page may look sentences up
+#endif
+  ds.hideStatusReadout = false; // default ON-screen readout stays visible
+  ds.nozzleScaleMax  = GAUGE_NOZZLE_SCALE_DEFAULT;
+  ds.bedScaleMax     = GAUGE_BED_SCALE_DEFAULT;
+  ds.chamberScaleMax = GAUGE_CHAMBER_SCALE_DEFAULT;
+  ds.powerScaleW     = GAUGE_POWER_SCALE_DEFAULT;
+  ds.gaugeSmoothing  = 2;          // Normal
+  ds.warnColor       = CLR_RED;
+  ds.warnThresholdPct = 0;         // off by default (no behavior change)
+  // Accent colors (#163) - all default to the green they replaced.
+  ds.etaColor        = CLR_GREEN;
+  ds.finishColor     = CLR_GREEN;
+  ds.statusOkColor   = CLR_GREEN;
+  ds.printerNameColor = CLR_GREEN;
+  // Neutral text: the factory literals these fields replace. CLR_TEXT /
+  // CLR_TEXT_DIM now resolve to the fields themselves (settings.h), so the
+  // defaults must name the *_DEFAULT constants or they would be circular.
+  ds.textColor       = CLR_TEXT_DEFAULT;
+  ds.textDimColor    = CLR_TEXT_DIM_DEFAULT;
+  ds.doorClosedColor = CLR_GREEN;
+  ds.doorOpenColor   = CLR_ORANGE;
+
+  // Progress: green arc, green label, white value
+  ds.progress = { CLR_GREEN, CLR_GREEN, CLR_TEXT_DEFAULT };
+  // Nozzle: orange arc, orange label, white value
+  ds.nozzle = { CLR_ORANGE, CLR_ORANGE, CLR_TEXT_DEFAULT };
+  // Bed: cyan arc, cyan label, white value
+  ds.bed = { CLR_CYAN, CLR_CYAN, CLR_TEXT_DEFAULT };
+  // Part fan: cyan arc, cyan label, white value
+  ds.partFan = { CLR_CYAN, CLR_CYAN, CLR_TEXT_DEFAULT };
+  // Aux fan: orange arc, orange label, white value
+  ds.auxFan = { CLR_ORANGE, CLR_ORANGE, CLR_TEXT_DEFAULT };
+  // Aux right fan (X2D): orange arc, orange label, white value
+  ds.auxFanRight = { CLR_ORANGE, CLR_ORANGE, CLR_TEXT_DEFAULT };
+  // Chamber fan: green arc, green label, white value
+  ds.chamberFan = { CLR_GREEN, CLR_GREEN, CLR_TEXT_DEFAULT };
+  // Exhaust fan (X2D): green arc, green label, white value
+  ds.exhaustFan = { CLR_GREEN, CLR_GREEN, CLR_TEXT_DEFAULT };
+  // Chamber temp: cyan arc, cyan label, white value
+  ds.chamberTemp = { CLR_CYAN, CLR_CYAN, CLR_TEXT_DEFAULT };
+  // Heatbreak fan: orange arc, orange label, white value
+  ds.heatbreak = { CLR_ORANGE, CLR_ORANGE, CLR_TEXT_DEFAULT };
+  // Power: gold arc + label, white value (matches the previous hardcoded look)
+  ds.power = { CLR_GOLD, CLR_GOLD, CLR_TEXT_DEFAULT };
+  // Layer: green arc + label, white value (matches the previous Progress reuse)
+  ds.layer = { CLR_GREEN, CLR_GREEN, CLR_TEXT_DEFAULT };
+}
+
+// Default standard 2x3 grid: Progress, Nozzle, Bed, Part Fan, Aux Fan, Chamber Fan.
+static void defaultGaugeSlots(uint8_t* slots) {
+#if DISPLAY_IS_ROUND
+  // Round Rim skin: only slots 0-2 render (left/center/right mini gauge).
+  // Default matches the original fixed layout; slots 3-5 stay unused.
+  slots[0] = GAUGE_NOZZLE;
+  slots[1] = GAUGE_BED;
+  slots[2] = GAUGE_PART_FAN;
+  slots[3] = GAUGE_EMPTY;
+  slots[4] = GAUGE_EMPTY;
+  slots[5] = GAUGE_EMPTY;
+#else
+  slots[0] = GAUGE_PROGRESS;
+  slots[1] = GAUGE_NOZZLE;
+  slots[2] = GAUGE_BED;
+  slots[3] = GAUGE_PART_FAN;
+  slots[4] = GAUGE_AUX_FAN;
+  slots[5] = GAUGE_CHAMBER_FAN;
+#endif
+}
+
+// Default Ready / Print Complete pair: the nozzle and bed gauges those screens
+// drew before the slots became configurable.
+static void defaultIdleSlots(uint8_t* slots) {
+  slots[0] = GAUGE_NOZZLE;
+  slots[1] = GAUGE_BED;
+}
+
+// ---------------------------------------------------------------------------
+//  Save/load a single GaugeColors struct
+// ---------------------------------------------------------------------------
+static void saveGaugeColors(const char* prefix, const GaugeColors& gc) {
+  char key[16];
+  snprintf(key, sizeof(key), "%s_a", prefix);
+  prefs.putUShort(key, gc.arc);
+  snprintf(key, sizeof(key), "%s_l", prefix);
+  prefs.putUShort(key, gc.label);
+  snprintf(key, sizeof(key), "%s_v", prefix);
+  prefs.putUShort(key, gc.value);
+}
+
+static void loadGaugeColors(const char* prefix, GaugeColors& gc, const GaugeColors& def) {
+  char key[16];
+  snprintf(key, sizeof(key), "%s_a", prefix);
+  gc.arc = prefs.getUShort(key, def.arc);
+  snprintf(key, sizeof(key), "%s_l", prefix);
+  gc.label = prefs.getUShort(key, def.label);
+  snprintf(key, sizeof(key), "%s_v", prefix);
+  gc.value = prefs.getUShort(key, def.value);
+}
+
+// ---------------------------------------------------------------------------
+//  Custom gauge labels
+// ---------------------------------------------------------------------------
+// Copy a user label into a fixed buffer, keeping valid UTF-8 that the bundled
+// VLW fonts can render (ASCII + Latin-1 Supplement + Latin Extended-A + euro)
+// and dropping anything unsafe to emit raw into an HTML value="..." attribute.
+// Control chars, the HTML-special set (" < > &), 4-byte sequences (emoji - no
+// glyphs anyway) and malformed/overlong UTF-8 are stripped; a multi-byte
+// sequence is only kept if it fully fits, so `out` never ends mid-character.
+// Leading/trailing spaces are trimmed. The ONE place label sanitizing lives -
+// used by the web form, JSON import, and after every NVS load.
+void sanitizeGaugeLabel(const char* in, char* out, size_t outLen) {
+  if (!out || outLen == 0) return;
+  size_t w = 0;
+  if (in) {
+    const uint8_t* p = (const uint8_t*)in;
+    while (*p && w < outLen - 1) {
+      uint8_t c = *p;
+      if (c < 0x80) {                       // ASCII fast path
+        p++;
+        if (c < 0x20 || c == 0x7F) continue;                          // control
+        if (c == '"' || c == '<' || c == '>' || c == '&') continue;   // HTML-unsafe
+        if (c == ' ' && w == 0) continue;                             // leading spaces
+        out[w++] = (char)c;
+        continue;
+      }
+      // Multi-byte lead. 0xC0/0xC1 are overlong 2-byte leads (rejected below).
+      size_t len = (c >= 0xC2 && c <= 0xDF) ? 2
+                 : (c >= 0xE0 && c <= 0xEF) ? 3
+                 : (c >= 0xF0 && c <= 0xF4) ? 4 : 0;
+      if (len == 0) { p++; continue; }      // stray continuation / invalid lead
+      // Strict continuation-byte bounds so overlong forms and UTF-16 surrogate
+      // code units are rejected (defense-in-depth against an overlong '<' etc.):
+      //   E0: 2nd byte A0-BF (else overlong)   ED: 2nd byte 80-9F (else surrogate)
+      //   F0: 2nd byte 90-BF (else overlong)   F4: 2nd byte 80-8F (else > U+10FFFF)
+      uint8_t lo = 0x80, hi = 0xBF;
+      if (c == 0xE0)      lo = 0xA0;
+      else if (c == 0xED) hi = 0x9F;
+      else if (c == 0xF0) lo = 0x90;
+      else if (c == 0xF4) hi = 0x8F;
+      bool valid = (p[1] >= lo && p[1] <= hi);
+      for (size_t i = 2; i < len && valid; i++)
+        if ((p[i] & 0xC0) != 0x80) valid = false;
+      if (!valid) { p++; continue; }        // malformed: drop lead byte, resync
+      p += len;
+      if (len == 4) continue;               // emoji / astral - no glyphs, drop
+      if (w + len > outLen - 1) break;      // whole sequence must fit or nothing
+      memcpy(out + w, p - len, len);
+      w += len;
+    }
+  }
+  while (w > 0 && out[w - 1] == ' ') w--;   // trim trailing spaces
+  out[w] = '\0';
+}
+
+// Strip an incomplete trailing UTF-8 sequence left behind by byte-wise
+// truncation (strlcpy/strncpy/snprintf into a fixed buffer). No-op on strings
+// that already end on a character boundary. Fixed-buffer copies elsewhere feed
+// this so a multi-byte char sliced by the buffer limit never reaches the
+// display or the HTML output.
+void utf8TrimPartial(char* s) {
+  if (!s) return;
+  size_t n = strlen(s);
+  if (n == 0) return;
+  // Walk back over continuation bytes (10xxxxxx) to the lead byte.
+  size_t cont = 0;
+  while (cont < n && cont < 3 && ((uint8_t)s[n - 1 - cont] & 0xC0) == 0x80) cont++;
+  size_t leadPos = (cont < n) ? (n - 1 - cont) : n;  // index of the lead byte
+  if (cont >= 3 && ((uint8_t)s[leadPos] & 0xC0) == 0x80) {
+    // More than 3 trailing continuation bytes => malformed; cut them all.
+    s[n - cont] = '\0';
+    return;
+  }
+  uint8_t lead = (uint8_t)s[leadPos];
+  if (lead < 0x80) return;                  // last char is ASCII - nothing partial
+  size_t need = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : (lead >= 0xC0) ? 2 : 1;
+  size_t have = n - leadPos;                // bytes present for this char
+  if (have < need) s[leadPos] = '\0';       // incomplete tail char - drop it
+}
+
+static void saveGaugeLabel(const char* key, const char* label) {
+  prefs.putString(key, label);
+}
+
+static void loadGaugeLabel(const char* key, char* out, size_t outLen) {
+  String raw = prefs.getString(key, "");
+  sanitizeGaugeLabel(raw.c_str(), out, outLen);  // defend against corrupt NVS
+}
+
+// ---------------------------------------------------------------------------
+//  Load settings
+// ---------------------------------------------------------------------------
+// Defined next to savePrinterConfig below; loadSettings and saveSettings both
+// need them first.
+static bool printerSlotIsFactoryDefault(const PrinterConfig& cfg);
+static void erasePrinterKeys(uint8_t index, bool prefsOpen);
+
+void loadSettings() {
+#if defined(BOARD_IS_WS_P4_7B)
+  p4Settings.revision = 0;
+#endif
+  // Open read-write from the start: we may need to write a migration flag.
+  // This is safe and avoids closing/reopening the partition mid-load.
+  prefs.begin(NVS_NAMESPACE, false);
+
+  // WiFi credentials
+  strlcpy(wifiSSID, prefs.getString("wifiSSID", "").c_str(), sizeof(wifiSSID));
+  strlcpy(wifiPass, prefs.getString("wifiPass", "").c_str(), sizeof(wifiPass));
+
+#if defined(BOARD_IS_WS_P4_7B)
+  p4PanelBrightness = prefs.getUChar("bright", 200);
+#else
+  brightness = prefs.getUChar("bright", 200);
+#endif
+  activePrinterIndex = prefs.getUChar("activePrt", 0);
+  if (activePrinterIndex >= MAX_PRINTERS) activePrinterIndex = 0;
+
+  // Load each printer slot
+  for (uint8_t i = 0; i < MAX_PRINTERS; i++) {
+    char key[16];
+    PrinterConfig& cfg = printers[i].config;
+
+    snprintf(key, sizeof(key), "p%d_ip", i);
+    strlcpy(cfg.ip, prefs.getString(key, "").c_str(), sizeof(cfg.ip));
+
+    snprintf(key, sizeof(key), "p%d_serial", i);
+    strlcpy(cfg.serial, prefs.getString(key, "").c_str(), sizeof(cfg.serial));
+
+    snprintf(key, sizeof(key), "p%d_code", i);
+    strlcpy(cfg.accessCode, prefs.getString(key, "").c_str(), sizeof(cfg.accessCode));
+
+    snprintf(key, sizeof(key), "p%d_name", i);
+    strlcpy(cfg.name, prefs.getString(key, "").c_str(), sizeof(cfg.name));
+    utf8TrimPartial(cfg.name);  // defend against a UTF-8 name sliced in old NVS
+
+    snprintf(key, sizeof(key), "p%d_mode", i);
+    cfg.mode = (ConnMode)prefs.getUChar(key, CONN_LOCAL);
+    if (cfg.mode == CONN_CLOUD) cfg.mode = CONN_CLOUD_ALL;  // migrate legacy value
+
+    snprintf(key, sizeof(key), "p%d_cuid", i);
+    strlcpy(cfg.cloudUserId, prefs.getString(key, "").c_str(), sizeof(cfg.cloudUserId));
+
+    snprintf(key, sizeof(key), "p%d_region", i);
+    cfg.region = (CloudRegion)prefs.getUChar(key, REGION_US);
+
+    // Gauge slot layout (per-printer). 3 NVS keys:
+    //   p%d_slots - standard 2x3 (6 bytes, always present after first save)
+    //   p%d_lext  - landscape extras (2 bytes, only after enabling 8-slot mode)
+    //   p%d_pext  - portrait  extras (3 bytes, only after enabling 9-slot mode)
+    // Missing keys -> EMPTY. Legacy 8/9-byte records from the in-development
+    // 'shared extras' branch read as 6-byte standard slots (trailing bytes
+    // ignored); their old landscape slots 6/7 will be re-set in the web UI.
+    snprintf(key, sizeof(key), "p%d_slots", i);
+    memset(cfg.gaugeSlots, GAUGE_EMPTY, sizeof(cfg.gaugeSlots));
+    size_t read = prefs.getBytes(key, cfg.gaugeSlots, sizeof(cfg.gaugeSlots));
+    if (read < sizeof(cfg.gaugeSlots)) {
+      defaultGaugeSlots(cfg.gaugeSlots);
+    } else {
+      uint8_t def[GAUGE_SLOT_COUNT];
+      defaultGaugeSlots(def);
+      for (uint8_t g = 0; g < GAUGE_SLOT_COUNT; g++) {
+        if (cfg.gaugeSlots[g] >= GAUGE_TYPE_COUNT) cfg.gaugeSlots[g] = def[g];
+      }
+#if DISPLAY_IS_ROUND
+      // One-time migration: savePrinterConfig persisted the grid default
+      // (Progress..ChamberFan) back when round builds ignored gaugeSlots.
+      // That exact pattern cannot be produced through the round web UI
+      // (only slots 0-2 are editable there), so treat it as "never
+      // customized" and swap in the round default (Nozzle/Bed/PartFan) to
+      // keep the Rim skin looking the way it did before slots applied.
+      static const uint8_t gridDef[GAUGE_SLOT_COUNT] = {
+        GAUGE_PROGRESS, GAUGE_NOZZLE, GAUGE_BED,
+        GAUGE_PART_FAN, GAUGE_AUX_FAN, GAUGE_CHAMBER_FAN
+      };
+      if (memcmp(cfg.gaugeSlots, gridDef, sizeof(gridDef)) == 0) {
+        defaultGaugeSlots(cfg.gaugeSlots);
+      }
+#endif
+    }
+
+    snprintf(key, sizeof(key), "p%d_lext", i);
+    memset(cfg.landscapeExtras, GAUGE_EMPTY, sizeof(cfg.landscapeExtras));
+    prefs.getBytes(key, cfg.landscapeExtras, sizeof(cfg.landscapeExtras));
+    for (uint8_t g = 0; g < LANDSCAPE_EXTRA_COUNT; g++) {
+      if (cfg.landscapeExtras[g] >= GAUGE_TYPE_COUNT) cfg.landscapeExtras[g] = GAUGE_EMPTY;
+    }
+
+    snprintf(key, sizeof(key), "p%d_pext", i);
+    memset(cfg.portraitExtras, GAUGE_EMPTY, sizeof(cfg.portraitExtras));
+    prefs.getBytes(key, cfg.portraitExtras, sizeof(cfg.portraitExtras));
+    for (uint8_t g = 0; g < PORTRAIT_EXTRA_COUNT; g++) {
+      if (cfg.portraitExtras[g] >= GAUGE_TYPE_COUNT) cfg.portraitExtras[g] = GAUGE_EMPTY;
+    }
+
+    // Ready / Print Complete pair. A missing key means a config written before
+    // these were configurable, so fall back to the nozzle+bed those screens
+    // always drew.
+    snprintf(key, sizeof(key), "p%d_islot", i);
+    defaultIdleSlots(cfg.idleSlots);
+    prefs.getBytes(key, cfg.idleSlots, sizeof(cfg.idleSlots));
+    for (uint8_t g = 0; g < IDLE_SLOT_COUNT; g++) {
+      // GAUGE_CAMERA is rejected, not just range-checked: the camera tile
+      // renders on its own cadence and camera_client only starts a stream for
+      // types parked in gaugeSlots, so it would freeze as a stale still here.
+      if (cfg.idleSlots[g] >= GAUGE_TYPE_COUNT || cfg.idleSlots[g] == GAUGE_CAMERA)
+        cfg.idleSlots[g] = GAUGE_EMPTY;
+    }
+
+    // AMS view (per-printer): 240x240 only, replaces gauge row 2 with AMS strip
+    snprintf(key, sizeof(key), "p%d_amsv", i);
+    cfg.amsView = prefs.getBool(key, false);
+
+    // Chamber-light automation (per-printer): flag bitmask + off delay (minutes)
+    snprintf(key, sizeof(key), "p%d_lflag", i);
+    cfg.lightFlags = prefs.getUChar(key, 0);
+    snprintf(key, sizeof(key), "p%d_ldly", i);
+    cfg.lightOffDelayMin = prefs.getUChar(key, 5);
+
+    // Zero out state
+    memset(&printers[i].state, 0, sizeof(BambuState));
+    printers[i].state.lightState = -1;  // unknown until lights_report arrives
+    // Latched, not armed: a printer that is already FINISH when we connect must
+    // not have the connection time recorded as its completion time
+    printers[i].state.finishTimeLatched = true;
+    // 0 is a valid tray index (AMS 1 slot 1) - if the active tray is never
+    // resolved the filament swatch would show that tray's data
+    printers[i].state.ams.activeTray = 255;
+    printers[i].state.ams.ovUnitId = 255;
+    setPrinterGcodeStateCanonical(printers[i].state, GCODE_UNKNOWN);
+  }
+
+  // One-shot migration: copy legacy global dsp_amsv to every configured
+  // printer slot that doesn't already have its own value, then remove the
+  // legacy key. Factory-default slots are skipped: with legacy true the flag
+  // would mark them non-default forever, so saveSettings could never reclaim
+  // their entries. An empty slot gets the setting from the web UI once it is
+  // actually configured.
+  if (prefs.isKey("dsp_amsv")) {
+    bool legacy = prefs.getBool("dsp_amsv", false);
+    for (uint8_t i = 0; i < MAX_PRINTERS; i++) {
+      if (printerSlotIsFactoryDefault(printers[i].config)) continue;
+      char key[16];
+      snprintf(key, sizeof(key), "p%d_amsv", i);
+      if (!prefs.isKey(key)) {
+        prefs.putBool(key, legacy);
+        printers[i].config.amsView = legacy;
+      }
+    }
+    prefs.remove("dsp_amsv");
+  }
+
+  // Display settings
+  DisplaySettings def;
+  defaultDisplaySettings(def);
+
+  dispSettings.rotation = normalizeDisplayRotation(prefs.getUChar("dsp_rot", def.rotation));
+  dispSettings.bgColor = prefs.getUShort("dsp_bg", def.bgColor);
+  dispSettings.trackColor = prefs.getUShort("dsp_trk", def.trackColor);
+  dispSettings.animatedBar = prefs.getBool("dsp_abar", def.animatedBar);
+  dispSettings.pongClock = prefs.getBool("dsp_pong", def.pongClock);
+  dispSettings.smallLabels = prefs.getBool("dsp_slbl", def.smallLabels);
+  {
+    // Pre-3.7.7 devices only have the boolean "show remaining instead of ETA".
+    // 0xFF means the new key was never written, so fall back to it once; from
+    // the next save on, both keys are kept in sync.
+    uint8_t tdm = prefs.getUChar("dsp_timem", 0xFF);
+    if (tdm > 2) tdm = prefs.getBool("dsp_shtire", false) ? 1 : 0;
+    dispSettings.timeDisplayMode = tdm;
+  }
+  dispSettings.fanMatchPrinter = prefs.getBool("dsp_fanmp", def.fanMatchPrinter);
+  dispSettings.invertColors = prefs.getBool("dsp_inv", def.invertColors);
+  dispSettings.cydPanelClassic = prefs.getBool("dsp_cydcls", def.cydPanelClassic);
+  dispSettings.cyd32eVariant = prefs.getBool("dsp_cyd32e", def.cyd32eVariant);
+  dispSettings.roundSkin = prefs.getUChar("dsp_rskin", def.roundSkin);
+  if (dispSettings.roundSkin > 2) dispSettings.roundSkin = 0;
+  dispSettings.cardStyle = prefs.getUChar("dsp_card", def.cardStyle);
+  if (dispSettings.cardStyle > 1) dispSettings.cardStyle = 0;
+  dispSettings.cardLeft = prefs.getUChar("dsp_cleft", def.cardLeft);
+  if (dispSettings.cardLeft > 2) dispSettings.cardLeft = 0;
+  dispSettings.cardBottom = prefs.getUChar("dsp_cbot", def.cardBottom);
+  if (dispSettings.cardBottom > 1) dispSettings.cardBottom = 0;
+  dispSettings.cardReady = prefs.getUChar("dsp_crdy", def.cardReady);
+  if (dispSettings.cardReady > 2) dispSettings.cardReady = 0;
+  dispSettings.landscape8Slots = prefs.getBool("dsp_l8s", def.landscape8Slots);
+  dispSettings.portrait9Slots = prefs.getBool("dsp_p9s", def.portrait9Slots);
+  dispSettings.clockTimeColor = prefs.getUShort("dsp_clkt", CLR_TEXT_DEFAULT);
+  dispSettings.clockDateColor = prefs.getUShort("dsp_clkd", CLR_TEXT_DIM_DEFAULT);
+  {
+    uint8_t cts = prefs.getUChar("dsp_clkts", def.clockTimeSize);
+    dispSettings.clockTimeSize = (cts <= 3) ? cts : 0;
+  }
+  {
+    uint8_t cds = prefs.getUChar("dsp_clkds", def.clockDateSize);
+    dispSettings.clockDateSize = (cds <= 3) ? cds : 0;
+  }
+  dispSettings.hideClockDate = prefs.getBool("dsp_clkhd", def.hideClockDate);
+  dispSettings.showClockInfo = prefs.getBool("dsp_clkif", def.showClockInfo);
+  dispSettings.amsTrayTypes = prefs.getBool("dsp_amst", def.amsTrayTypes);
+  dispSettings.buttonPowerControl = prefs.getBool("dsp_btpw", def.buttonPowerControl);
+  dispSettings.gestTap  = prefs.getUChar("dsp_gtap", def.gestTap);
+  if (dispSettings.gestTap > GT_WAKE) dispSettings.gestTap = GT_SMART;
+  // Before the gesture card, double-click = plug power was the dsp_btpw checkbox.
+  dispSettings.gestDouble = prefs.isKey("dsp_gdbl")
+      ? prefs.getUChar("dsp_gdbl", def.gestDouble)
+      : (dispSettings.buttonPowerControl ? GD_PLUG : GD_OFF);
+  if (dispSettings.gestDouble > GD_NEXT) dispSettings.gestDouble = GD_OFF;
+  dispSettings.buttonPowerControl = (dispSettings.gestDouble == GD_PLUG);
+  dispSettings.gestHold = prefs.getUChar("dsp_ghold", def.gestHold);
+  if (dispSettings.gestHold > GH_NONE) dispSettings.gestHold = GH_LED;
+  dispSettings.showBatteryIndicator = prefs.getBool("dsp_bat", def.showBatteryIndicator);
+  dispSettings.hideStatusReadout = prefs.getBool("dsp_hidlp", def.hideStatusReadout);
+  {
+    uint8_t gm = prefs.getUChar("dsp_glowm", def.glowMode);
+    dispSettings.glowMode = (gm <= 2) ? gm : 0;
+    dispSettings.glowColor = prefs.getUShort("dsp_glowc", def.glowColor);
+    uint8_t gs = prefs.getUChar("dsp_glows", def.glowStyle);
+    dispSettings.glowStyle = (gs <= 2) ? gs : 0;
+    uint8_t gd = prefs.getUChar("dsp_glowd", def.glowDuration);
+    dispSettings.glowDuration = (gd <= 2) ? gd : 0;
+  }
+#if HAS_HMS_UI
+  {
+    dispSettings.hmsEnabled = prefs.getBool("dsp_hmsen", def.hmsEnabled);
+    dispSettings.hmsSeverityAll = prefs.getBool("dsp_hmssev", def.hmsSeverityAll);
+    dispSettings.hmsAlertMask = prefs.getUChar("dsp_hmsmask", def.hmsAlertMask) & 0x0F;
+    uint8_t ap = prefs.getUChar("dsp_hmsauto", def.hmsAutoPresent);
+    dispSettings.hmsAutoPresent = (ap <= 2) ? ap : 0;
+    dispSettings.hmsLookupOnline = prefs.getBool("dsp_hmsonl", def.hmsLookupOnline);
+  }
+#endif
+  dispSettings.nozzleScaleMax  = constrain((int)prefs.getUShort("dsp_nozmx", def.nozzleScaleMax),
+                                           GAUGE_NOZZLE_SCALE_MIN, GAUGE_NOZZLE_SCALE_MAX);
+  dispSettings.bedScaleMax     = constrain((int)prefs.getUShort("dsp_bedmx", def.bedScaleMax),
+                                           GAUGE_BED_SCALE_MIN, GAUGE_BED_SCALE_MAX);
+  dispSettings.chamberScaleMax = constrain((int)prefs.getUShort("dsp_chbmx", def.chamberScaleMax),
+                                           GAUGE_CHAMBER_SCALE_MIN, GAUGE_CHAMBER_SCALE_MAX);
+  dispSettings.powerScaleW     = constrain((int)prefs.getUShort("dsp_pwrmx", def.powerScaleW),
+                                           GAUGE_POWER_SCALE_MIN, GAUGE_POWER_SCALE_MAX);
+  {
+    uint8_t sm = prefs.getUChar("dsp_smooth", def.gaugeSmoothing);
+    dispSettings.gaugeSmoothing = (sm <= 3) ? sm : 2;
+  }
+  dispSettings.warnColor        = prefs.getUShort("dsp_wclr", def.warnColor);
+  dispSettings.warnThresholdPct = constrain((int)prefs.getUChar("dsp_wthr", def.warnThresholdPct), 0, 100);
+  dispSettings.etaColor         = prefs.getUShort("dsp_etac", def.etaColor);
+  dispSettings.finishColor      = prefs.getUShort("dsp_finc", def.finishColor);
+  dispSettings.statusOkColor    = prefs.getUShort("dsp_okc", def.statusOkColor);
+  dispSettings.printerNameColor = prefs.getUShort("dsp_pnc", def.printerNameColor);
+  dispSettings.textColor        = prefs.getUShort("dsp_txtc", def.textColor);
+  dispSettings.textDimColor     = prefs.getUShort("dsp_txtd", def.textDimColor);
+  // Closed door falls back to the Status OK accent, not to the plain default:
+  // it followed that accent in the release before this pair existed, so an
+  // upgrade must not snap a themed door back to green. Re-reads the accent from
+  // NVS rather than from dispSettings so the fallback does not silently depend
+  // on the order of the lines above it.
+  dispSettings.doorClosedColor  = prefs.getUShort("dsp_dorc",
+                                    prefs.getUShort("dsp_okc", def.statusOkColor));
+  dispSettings.doorOpenColor    = prefs.getUShort("dsp_doro", def.doorOpenColor);
+
+  loadGaugeColors("gc_prg", dispSettings.progress, def.progress);
+  loadGaugeColors("gc_noz", dispSettings.nozzle, def.nozzle);
+  loadGaugeColors("gc_bed", dispSettings.bed, def.bed);
+  loadGaugeColors("gc_pfn", dispSettings.partFan, def.partFan);
+  loadGaugeColors("gc_afn", dispSettings.auxFan, def.auxFan);
+  loadGaugeColors("gc_afr", dispSettings.auxFanRight, def.auxFanRight);
+  loadGaugeColors("gc_cfn", dispSettings.chamberFan, def.chamberFan);
+  loadGaugeColors("gc_exh", dispSettings.exhaustFan, def.exhaustFan);
+  loadGaugeColors("gc_cht", dispSettings.chamberTemp, def.chamberTemp);
+  loadGaugeColors("gc_hbk", dispSettings.heatbreak, def.heatbreak);
+  loadGaugeColors("gc_pwr", dispSettings.power, def.power);
+  loadGaugeColors("gc_lyr", dispSettings.layer, def.layer);
+
+  // Custom gauge labels (empty default = use built-in label)
+  loadGaugeLabel("gl_prg", gaugeLabels.progress,    sizeof(gaugeLabels.progress));
+  loadGaugeLabel("gl_noz", gaugeLabels.nozzle,      sizeof(gaugeLabels.nozzle));
+  loadGaugeLabel("gl_nzr", gaugeLabels.nozzleRight, sizeof(gaugeLabels.nozzleRight));
+  loadGaugeLabel("gl_nzl", gaugeLabels.nozzleLeft,  sizeof(gaugeLabels.nozzleLeft));
+  loadGaugeLabel("gl_bed", gaugeLabels.bed,         sizeof(gaugeLabels.bed));
+  loadGaugeLabel("gl_pfn", gaugeLabels.partFan,     sizeof(gaugeLabels.partFan));
+  loadGaugeLabel("gl_afn", gaugeLabels.auxFan,      sizeof(gaugeLabels.auxFan));
+  loadGaugeLabel("gl_afr", gaugeLabels.auxFanRight, sizeof(gaugeLabels.auxFanRight));
+  loadGaugeLabel("gl_cfn", gaugeLabels.chamberFan,  sizeof(gaugeLabels.chamberFan));
+  loadGaugeLabel("gl_exh", gaugeLabels.exhaustFan,  sizeof(gaugeLabels.exhaustFan));
+  loadGaugeLabel("gl_cht", gaugeLabels.chamberTemp, sizeof(gaugeLabels.chamberTemp));
+  loadGaugeLabel("gl_hbk", gaugeLabels.heatbreak,   sizeof(gaugeLabels.heatbreak));
+  loadGaugeLabel("gl_pwr", gaugeLabels.power,       sizeof(gaugeLabels.power));
+  loadGaugeLabel("gl_lyr", gaugeLabels.layer,       sizeof(gaugeLabels.layer));
+  loadGaugeLabel("gl_clk", gaugeLabels.clock,       sizeof(gaugeLabels.clock));
+  loadGaugeLabel("gl_ams", gaugeLabels.amsBase,     sizeof(gaugeLabels.amsBase));
+  // Door: default "Door" only on first run (key absent). An explicit empty value
+  // means "hide the text, show just the padlock icon" - not "use default".
+  if (prefs.isKey("gl_dor")) loadGaugeLabel("gl_dor", gaugeLabels.door, sizeof(gaugeLabels.door));
+  else strlcpy(gaugeLabels.door, "Door", sizeof(gaugeLabels.door));
+
+  // Top progress bar color. Before this setting existed the bar reused the
+  // Progress gauge arc color, so migrate absent keys to that value to avoid a
+  // visible color change for users who had customized the progress arc.
+  if (prefs.isKey("dsp_pbar")) {
+    dispSettings.progressBarColor = prefs.getUShort("dsp_pbar", def.progressBarColor);
+  } else {
+    dispSettings.progressBarColor = dispSettings.progress.arc;
+  }
+
+  // Network settings
+  netSettings.useDHCP = prefs.getBool("net_dhcp", true);
+  strlcpy(netSettings.staticIP, prefs.getString("net_ip", "").c_str(), sizeof(netSettings.staticIP));
+  strlcpy(netSettings.gateway, prefs.getString("net_gw", "").c_str(), sizeof(netSettings.gateway));
+  strlcpy(netSettings.subnet, prefs.getString("net_sn", "255.255.255.0").c_str(), sizeof(netSettings.subnet));
+  strlcpy(netSettings.dns, prefs.getString("net_dns", "").c_str(), sizeof(netSettings.dns));
+  netSettings.showIPAtStartup = prefs.getBool("net_showip", true);
+  netSettings.mdnsEnabled = prefs.getBool("net_mdns", false);
+  // Sanitize on load too: a bad value from an older build or corrupted NVS must
+  // never reach %MDNS_HOST% raw.
+  sanitizeHostname(prefs.getString("net_host", "bambuhelper").c_str(),
+                   netSettings.hostname, sizeof(netSettings.hostname));
+
+  // Timezone: load POSIX string, migrating from legacy gmtOffsetMin if needed.
+  // All reads and any migration writes happen in the same open transaction to
+  // prevent incomplete state if power is lost mid-migration.
+  bool tzMigrated = prefs.getBool("tz_migrated", false);
+  String tzStr = prefs.getString("net_tzstr", "");
+  if (tzStr.isEmpty() && !tzMigrated) {
+    // Legacy migration: convert old integer offset to POSIX timezone string.
+    int16_t oldOffset = prefs.getShort("net_tz", 60);
+    const char* migrated = getDefaultTimezoneForOffset(oldOffset);
+    if (migrated) {
+      tzStr = migrated;
+    } else {
+      tzStr = "CET-1CEST,M3.5.0/02:00,M10.5.0/03:00";
+    }
+    // Write both the migrated value and the completion flag in the same
+    // transaction so a power loss cannot leave migration half-done.
+    prefs.putString("net_tzstr", tzStr);
+    prefs.putBool("tz_migrated", true);
+    Serial.printf("[SETTINGS] Migrated timezone: offset %d -> %s\n", oldOffset, tzStr.c_str());
+  } else if (!tzStr.isEmpty() && !tzMigrated) {
+    // Recovery: net_tzstr already exists but flag is absent — this device ran
+    // the old migration code and lost power before it could be marked done.
+    // Stamp the flag now so future boots skip migration entirely.
+    prefs.putBool("tz_migrated", true);
+  }
+  strlcpy(netSettings.timezoneStr, tzStr.c_str(), sizeof(netSettings.timezoneStr));
+
+  // Re-resolve the index from the POSIX string (handles database reordering
+  // across firmware updates without relying on a stored index value).
+  netSettings.timezoneIndex = resolveTimezoneIndex(netSettings.timezoneStr);
+
+  netSettings.use24h = prefs.getBool("net_24h", true);
+  netSettings.dateFormat = prefs.getUChar("net_datefmt", 0);
+
+  // Display power settings
+  dpSettings.finishDisplayMins = prefs.getUShort("dp_fmins", 3);
+  dpSettings.keepDisplayOn = prefs.getBool("dp_keepon", false);
+  dpSettings.showClockAfterFinish = prefs.getBool("dp_clock", true);
+  dpSettings.doorAckEnabled = prefs.getBool("dp_dack", false);
+  dpSettings.keepPrintScreen = prefs.getBool("dp_kps", false);
+  dpSettings.finishShowTime = prefs.getBool("dp_fintm", true);
+  dpSettings.nightModeEnabled = prefs.getBool("dp_night", false);
+  dpSettings.nightStartHour = prefs.getUChar("dp_nstart", 22);
+  dpSettings.nightEndHour = prefs.getUChar("dp_nend", 7);
+  dpSettings.nightBrightness = prefs.getUChar("dp_nbright", 30);
+  dpSettings.screensaverBrightness = prefs.getUChar("dp_ssbright", 30);
+
+  // Rotation settings (multi-printer)
+  rotState.mode = (RotateMode)prefs.getUChar("rot_mode", ROTATE_SMART);
+  rotState.intervalMs = prefs.getULong("rot_intv", ROTATE_INTERVAL_MS);
+  if (rotState.intervalMs < ROTATE_MIN_MS) rotState.intervalMs = ROTATE_MIN_MS;
+  if (rotState.intervalMs > ROTATE_MAX_MS) rotState.intervalMs = ROTATE_MAX_MS;
+  rotState.splitEnabled = prefs.getBool("rot_split", false);
+  rotState.splitForce = prefs.getBool("rot_splitf", false);
+  rotState.displayIndex = 0;
+  rotState.splitIndexB = 1;
+  rotState.lastRotateMs = 0;
+
+  // Button settings
+#if defined(USE_CST816) || defined(USE_CST328) || defined(USE_XPT2046) || defined(USE_FT5X06) || defined(USE_FT6336) || defined(USE_AXS_TOUCH) || defined(USE_GT911) || defined(TOUCH_CS)
+  buttonType = (ButtonType)prefs.getUChar("btn_type", BTN_TOUCHSCREEN);
+#else
+  buttonType = (ButtonType)prefs.getUChar("btn_type", BTN_DISABLED);
+#endif
+  buttonPin = prefs.getUChar("btn_pin", BUTTON_DEFAULT_PIN);
+
+  // Buzzer settings
+  buzzerSettings.enabled = prefs.getBool("buz_on", false);
+  buzzerSettings.pin = prefs.getUChar("buz_pin", BUZZER_DEFAULT_PIN);
+#if defined(BOARD_IS_WS200) || defined(BOARD_IS_WS280) || \
+    (defined(BOARD_IS_S3_ZERO) && defined(DISPLAY_240x320))
+  // One-shot migration off the bad pre-v3.7.7 default. These ESP32-S3 boards
+  // reuse the 240x320 layout profile and used to inherit the CYD's GPIO 26,
+  // which is a flash/PSRAM bus pin on the S3 - the buzzer could never work
+  // there. Anyone who opened the settings page has 26 persisted in NVS, so
+  // rewrite exactly that value to the board's real default. A pin the user
+  // picked themselves is left alone (sanitizeBuzzerPin() vets it instead).
+  if (buzzerSettings.pin == 26) {
+    buzzerSettings.pin = BUZZER_DEFAULT_PIN;
+    prefs.putUChar("buz_pin", buzzerSettings.pin);
+    Serial.printf("Buzzer: migrated stale pin 26 -> %d\n", buzzerSettings.pin);
+  }
+#endif
+  buzzerSettings.quietStartHour = prefs.getUChar("buz_qstart", 0);
+  buzzerSettings.quietEndHour = prefs.getUChar("buz_qend", 0);
+  buzzerSettings.buttonClick = prefs.getBool("buz_click", false);
+  buzzerSettings.bedCooldownAlert = prefs.getBool("buz_bed_on", false);
+  uint8_t bct = prefs.getUChar("buz_bed_c", 35);
+  if (bct < 20 || bct > 80) bct = 35;
+  buzzerSettings.bedCooldownThresholdC = bct;
+
+  // Status LED settings
+  ledSettings.enabled    = prefs.getBool ("led_on",  false);
+  ledSettings.pin        = prefs.getUChar("led_pin", LED_DEFAULT_PIN);
+  ledSettings.brightness = prefs.getUChar("led_br",  128);
+
+  ledSettings.finishMode       = prefs.getUChar ("led_fx_md",  LED_FINISH_OFF);
+  ledSettings.finishSeconds    = prefs.getUShort("led_fx_sec", 60);
+  ledSettings.finishBrightness = prefs.getUChar ("led_fx_br",  255);
+
+  ledSettings.autoOnWhilePrinting = prefs.getBool("led_auto_pr", false);
+  ledSettings.pauseBreathing      = prefs.getBool("led_pause",   false);
+  ledSettings.errorStrobe         = prefs.getBool("led_err",     false);
+  ledSettings.errorStrobeSeconds  = prefs.getUShort("led_err_sec", LED_ERROR_STROBE_DEFAULT_S);
+
+  // Colour driver. Absent on an install that predates it, so the defaults keep
+  // the LED single-channel and nothing about an existing setup changes.
+  ledSettings.driver      = prefs.getUChar("led_drv",   LED_DRV_SINGLE);
+  ledSettings.pinG        = prefs.getUChar("led_ping",  ONBOARD_RGB_G_PIN);
+  ledSettings.pinB        = prefs.getUChar("led_pinb",  ONBOARD_RGB_B_PIN);
+  ledSettings.commonAnode = prefs.getBool ("led_anode", ONBOARD_RGB_ANODE != 0);
+
+  ledSettings.colorIdle     = prefs.getUInt("led_c_idl", LED_COLOR_IDLE_DEFAULT);
+  ledSettings.colorPrinting = prefs.getUInt("led_c_prn", LED_COLOR_PRINTING_DEFAULT);
+  ledSettings.colorPaused   = prefs.getUInt("led_c_pau", LED_COLOR_PAUSED_DEFAULT);
+  ledSettings.colorFinished = prefs.getUInt("led_c_fin", LED_COLOR_FINISHED_DEFAULT);
+  ledSettings.colorError    = prefs.getUInt("led_c_err", LED_COLOR_ERROR_DEFAULT);
+
+  ledSettings.nightOff      = prefs.getBool("led_night", false);
+
+  // Tasmota power monitoring — array of N plugs with numbered NVS keys
+  // One-shot migration from legacy singleton keys (tsm_en/ip/dm/pi/slot) into
+  // numbered keys (tsm0_*, tsm1_*). Runs once when legacy keys exist and
+  // tsm0_en is absent. Legacy keys are removed after migration completes.
+  if (prefs.isKey("tsm_en") && !prefs.isKey("tsm0_en")) {
+    bool    legEn   = prefs.getBool ("tsm_en",   false);
+    String  legIp   = prefs.getString("tsm_ip",  "");
+    uint8_t legDm   = prefs.getUChar("tsm_dm",   0);
+    uint8_t legPi   = prefs.getUChar("tsm_pi",   10);
+    uint8_t legSlot = prefs.getUChar("tsm_slot", 255);
+    if (legSlot != 255 && legSlot >= MAX_ACTIVE_PRINTERS) legSlot = 255;
+
+#if TASMOTA_PLUG_COUNT == 1
+    // Single-plug build: copy to plug 0 and keep assignedSlot
+    prefs.putBool ("tsm0_en",  legEn);
+    prefs.putString("tsm0_ip", legIp);
+    prefs.putUChar("tsm0_dm",  legDm);
+    prefs.putUChar("tsm0_pi",  legPi);
+    prefs.putUChar("tsm0_as",  legSlot);
+#else
+    // Dual-plug build: route to plug index 0 or 1 based on legacy slot
+    uint8_t targetPlug = (legSlot == 1) ? 1 : 0;
+    char k[12];
+    snprintf(k, sizeof(k), "tsm%u_en", targetPlug);  prefs.putBool(k, legEn);
+    snprintf(k, sizeof(k), "tsm%u_ip", targetPlug);  prefs.putString(k, legIp);
+    snprintf(k, sizeof(k), "tsm%u_dm", targetPlug);  prefs.putUChar(k, legDm);
+    snprintf(k, sizeof(k), "tsm%u_pi", targetPlug);  prefs.putUChar(k, legPi);
+#endif
+    prefs.remove("tsm_en");
+    prefs.remove("tsm_ip");
+    prefs.remove("tsm_dm");
+    prefs.remove("tsm_pi");
+    prefs.remove("tsm_slot");
+    Serial.println("[SETTINGS] Migrated legacy Tasmota keys to numbered scheme");
+  }
+
+  for (uint8_t i = 0; i < TASMOTA_PLUG_COUNT; i++) {
+    char k[12];
+    snprintf(k, sizeof(k), "tsm%u_en",  i); tasmotaSettings[i].enabled = prefs.getBool(k, false);
+    snprintf(k, sizeof(k), "tsm%u_pt",  i); {
+      uint8_t pt = prefs.getUChar(k, 0);
+      if (pt > 3) pt = 0;                       // 0=Tasmota, 1=Shelly Gen2/3, 2=Kasa legacy, 3=Shelly Power Strip Gen4
+      tasmotaSettings[i].plugType = pt;
+    }
+    snprintf(k, sizeof(k), "tsm%u_po",  i); {
+      uint8_t po = prefs.getUChar(k, 0);
+      if (po > 3) po = 0;
+      tasmotaSettings[i].plugOutlet = po;
+    }
+    snprintf(k, sizeof(k), "tsm%u_pe",  i); tasmotaSettings[i].plugOutletExtra = prefs.getUChar(k, 0) & 0x0F;
+    snprintf(k, sizeof(k), "tsm%u_ip",  i); strlcpy(tasmotaSettings[i].ip, prefs.getString(k, "").c_str(), sizeof(tasmotaSettings[i].ip));
+    snprintf(k, sizeof(k), "tsm%u_dm",  i); tasmotaSettings[i].displayMode = prefs.getUChar(k, 0);
+    snprintf(k, sizeof(k), "tsm%u_pi",  i); {
+      uint8_t pi = prefs.getUChar(k, 10);
+      if (pi < 10 || pi > 60) pi = 10;
+      tasmotaSettings[i].pollInterval = pi;
+    }
+    snprintf(k, sizeof(k), "tsm%u_ao",  i); tasmotaSettings[i].autoOffEnabled = prefs.getBool(k, false);
+    snprintf(k, sizeof(k), "tsm%u_ad",  i); {
+      uint8_t ad = prefs.getUChar(k, 10);
+      if (ad < 1 || ad > 240) ad = 10;
+      tasmotaSettings[i].autoOffDelayMin = ad;
+    }
+    snprintf(k, sizeof(k), "tsm%u_aod", i); tasmotaSettings[i].autoOffCancelOnDoor = prefs.getBool(k, false);
+#if TASMOTA_PLUG_COUNT == 1
+    snprintf(k, sizeof(k), "tsm%u_as",  i); {
+      uint8_t a = prefs.getUChar(k, 255);
+      if (a != 255 && a >= MAX_ACTIVE_PRINTERS) a = 255;
+      tasmotaSettings[i].assignedSlot = a;
+    }
+#endif
+  }
+  strlcpy(tasmotaCurrency, prefs.getString("tsm_cur", "\xE2\x82\xAC").c_str(), sizeof(tasmotaCurrency));
+  utf8TrimPartial(tasmotaCurrency);
+  {
+    float t = prefs.getFloat("tsm_tariff", 0.0f);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 10.0f) t = 10.0f;
+    tasmotaTariffPerKwh = t;
+  }
+
+  // Experimental dual-printer override on BOARD_LOW_RAM (local-only, not exported)
+  dualPrinterUnsafe = prefs.getBool("dualp", false);
+  // Experimental 4-printer override on BOARD_HAS_PSRAM (local-only, not exported)
+  quadPrinterBeta = prefs.getBool("quadp", false);
+
+  // C3 antenna workaround flag (local-only, not exported)
+  wifiTxCapped = prefs.getBool("wifi_txcap", false);
+
+  prefs.end();
+}
+
+#if defined(BOARD_IS_WS_P4_7B)
+void p4BootSettingsSnapshot(P4UiSettings& settings) {
+  settings = p4Settings;
+}
+
+static P4UiSettings* beginSettingsUpdate(P4UiSettings& settings) {
+  static P4UiSettings* previous = nullptr;
+  if (!previous) {
+    previous = static_cast<P4UiSettings*>(heap_caps_calloc(1, sizeof(P4UiSettings),
+                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (!previous) return nullptr;
+  *previous = p4Settings;
+  p4Settings = settings;
+  prefs.beginWriteVerification();
+  return previous;
+}
+
+static bool finishSettingsUpdate(P4UiSettings& settings, P4UiSettings* previous) {
+  const bool stored = prefs.endWriteVerification();
+  if (stored) {
+    settings = p4Settings;
+  } else {
+    // A failed or partial NVS update is never published as a committed value.
+    // Keep the running generation and its MQTT settings unchanged.
+    p4Settings = *previous;
+    settings = *previous;
+    Serial.println("NVS: P4 settings write or read-back FAILED");
+  }
+  return stored;
+}
+
+bool p4StoreSettings(P4UiSettings& settings) {
+  P4UiSettings* previous = beginSettingsUpdate(settings);
+  if (!previous) return false;
+  saveSettings();
+  saveRotationSettings();
+  saveButtonSettings();
+  saveBuzzerSettings();
+  saveLedSettings();
+  return finishSettingsUpdate(settings, previous);
+}
+
+bool p4ResetSettings(P4UiSettings& settings) {
+  P4UiSettings* previous = beginSettingsUpdate(settings);
+  if (!previous) return false;
+  const uint32_t revision = settings.revision;
+  // Absent keys mean defaults only when every old value has actually been
+  // removed. loadSettings() intentionally falls back to existing RAM values.
+  p4Settings = P4UiSettings{};
+  resetSettings();
+  loadSettings();
+  // A blank namespace reconstructs defaults; do not refill it with hundreds of
+  // unnecessary default-valued keys merely to complete a factory reset.
+  p4Settings.revision = revision;
+  return finishSettingsUpdate(settings, previous);
+}
+#endif
+
+// ---------------------------------------------------------------------------
+//  Save settings
+// ---------------------------------------------------------------------------
+void saveSettings() {
+  prefs.begin(NVS_NAMESPACE, false);
+
+  prefs.putString("wifiSSID", wifiSSID);
+  prefs.putString("wifiPass", wifiPass);
+#if defined(BOARD_IS_WS_P4_7B)
+  prefs.putUChar("bright", p4PanelBrightness);
+#else
+  prefs.putUChar("bright", brightness);
+#endif
+  prefs.putUChar("activePrt", activePrinterIndex);
+
+  for (uint8_t i = 0; i < MAX_PRINTERS; i++) {
+    // A factory-default slot is stored as "no keys", not as 14 default-valued
+    // keys - two idle slots are ~36 wasted entries on a 20 KB partition.
+    if (printerSlotIsFactoryDefault(printers[i].config)) erasePrinterKeys(i, true);
+    else savePrinterConfig(i);
+  }
+
+  // Display settings
+  prefs.putUChar("dsp_rot", dispSettings.rotation);
+  prefs.putUShort("dsp_bg", dispSettings.bgColor);
+  prefs.putUShort("dsp_trk", dispSettings.trackColor);
+  prefs.putUShort("dsp_pbar", dispSettings.progressBarColor);
+  prefs.putBool("dsp_abar", dispSettings.animatedBar);
+  prefs.putBool("dsp_pong", dispSettings.pongClock);
+  prefs.putBool("dsp_slbl", dispSettings.smallLabels);
+  prefs.putUChar("dsp_timem", dispSettings.timeDisplayMode);
+  // Keep the legacy boolean in sync so a firmware downgrade lands on the
+  // closest behaviour ("Both" degrades to the ETA form).
+  prefs.putBool("dsp_shtire", dispSettings.timeDisplayMode == 1);
+  prefs.putBool("dsp_fanmp", dispSettings.fanMatchPrinter);
+  prefs.putBool("dsp_inv", dispSettings.invertColors);
+  prefs.putBool("dsp_cydcls", dispSettings.cydPanelClassic);
+  prefs.putBool("dsp_cyd32e", dispSettings.cyd32eVariant);
+  prefs.putUChar("dsp_rskin", dispSettings.roundSkin);
+  prefs.putUChar("dsp_card", dispSettings.cardStyle);
+  prefs.putUChar("dsp_cleft", dispSettings.cardLeft);
+  prefs.putUChar("dsp_cbot", dispSettings.cardBottom);
+  prefs.putUChar("dsp_crdy", dispSettings.cardReady);
+  prefs.putBool("dsp_l8s", dispSettings.landscape8Slots);
+  prefs.putBool("dsp_p9s", dispSettings.portrait9Slots);
+  prefs.putUShort("dsp_clkt", dispSettings.clockTimeColor);
+  prefs.putUShort("dsp_clkd", dispSettings.clockDateColor);
+  prefs.putUChar("dsp_clkts", dispSettings.clockTimeSize);
+  prefs.putUChar("dsp_clkds", dispSettings.clockDateSize);
+  prefs.putBool("dsp_clkhd", dispSettings.hideClockDate);
+  prefs.putBool("dsp_clkif", dispSettings.showClockInfo);
+  prefs.putBool("dsp_amst", dispSettings.amsTrayTypes);
+  prefs.putBool("dsp_btpw", dispSettings.buttonPowerControl);
+  prefs.putUChar("dsp_gtap", dispSettings.gestTap);
+  prefs.putUChar("dsp_gdbl", dispSettings.gestDouble);
+  prefs.putUChar("dsp_ghold", dispSettings.gestHold);
+  prefs.putBool("dsp_bat", dispSettings.showBatteryIndicator);
+  prefs.putBool("dsp_hidlp", dispSettings.hideStatusReadout);
+  prefs.putUShort("dsp_nozmx", dispSettings.nozzleScaleMax);
+  prefs.putUShort("dsp_bedmx", dispSettings.bedScaleMax);
+  prefs.putUShort("dsp_chbmx", dispSettings.chamberScaleMax);
+  prefs.putUShort("dsp_pwrmx", dispSettings.powerScaleW);
+  prefs.putUChar("dsp_smooth", dispSettings.gaugeSmoothing);
+  prefs.putUShort("dsp_wclr", dispSettings.warnColor);
+  prefs.putUChar("dsp_wthr", dispSettings.warnThresholdPct);
+  prefs.putUShort("dsp_etac", dispSettings.etaColor);
+  prefs.putUShort("dsp_finc", dispSettings.finishColor);
+  prefs.putUShort("dsp_okc", dispSettings.statusOkColor);
+  prefs.putUShort("dsp_pnc", dispSettings.printerNameColor);
+  prefs.putUShort("dsp_txtc", dispSettings.textColor);
+  prefs.putUShort("dsp_txtd", dispSettings.textDimColor);
+  prefs.putUShort("dsp_dorc", dispSettings.doorClosedColor);
+  prefs.putUShort("dsp_doro", dispSettings.doorOpenColor);
+  prefs.putUChar("dsp_glowm", dispSettings.glowMode);
+  prefs.putUShort("dsp_glowc", dispSettings.glowColor);
+  prefs.putUChar("dsp_glows", dispSettings.glowStyle);
+  prefs.putUChar("dsp_glowd", dispSettings.glowDuration);
+#if HAS_HMS_UI
+  prefs.putBool("dsp_hmsen", dispSettings.hmsEnabled);
+  prefs.putBool("dsp_hmssev", dispSettings.hmsSeverityAll);
+  prefs.putUChar("dsp_hmsmask", dispSettings.hmsAlertMask);
+  prefs.putUChar("dsp_hmsauto", dispSettings.hmsAutoPresent);
+  prefs.putBool("dsp_hmsonl", dispSettings.hmsLookupOnline);
+#endif
+
+  saveGaugeColors("gc_prg", dispSettings.progress);
+  saveGaugeColors("gc_noz", dispSettings.nozzle);
+  saveGaugeColors("gc_bed", dispSettings.bed);
+  saveGaugeColors("gc_pfn", dispSettings.partFan);
+  saveGaugeColors("gc_afn", dispSettings.auxFan);
+  saveGaugeColors("gc_afr", dispSettings.auxFanRight);
+  saveGaugeColors("gc_cfn", dispSettings.chamberFan);
+  saveGaugeColors("gc_exh", dispSettings.exhaustFan);
+  saveGaugeColors("gc_cht", dispSettings.chamberTemp);
+  saveGaugeColors("gc_hbk", dispSettings.heatbreak);
+  saveGaugeColors("gc_pwr", dispSettings.power);
+  saveGaugeColors("gc_lyr", dispSettings.layer);
+
+  // Custom gauge labels
+  saveGaugeLabel("gl_prg", gaugeLabels.progress);
+  saveGaugeLabel("gl_noz", gaugeLabels.nozzle);
+  saveGaugeLabel("gl_nzr", gaugeLabels.nozzleRight);
+  saveGaugeLabel("gl_nzl", gaugeLabels.nozzleLeft);
+  saveGaugeLabel("gl_bed", gaugeLabels.bed);
+  saveGaugeLabel("gl_pfn", gaugeLabels.partFan);
+  saveGaugeLabel("gl_afn", gaugeLabels.auxFan);
+  saveGaugeLabel("gl_afr", gaugeLabels.auxFanRight);
+  saveGaugeLabel("gl_cfn", gaugeLabels.chamberFan);
+  saveGaugeLabel("gl_exh", gaugeLabels.exhaustFan);
+  saveGaugeLabel("gl_cht", gaugeLabels.chamberTemp);
+  saveGaugeLabel("gl_hbk", gaugeLabels.heatbreak);
+  saveGaugeLabel("gl_pwr", gaugeLabels.power);
+  saveGaugeLabel("gl_lyr", gaugeLabels.layer);
+  saveGaugeLabel("gl_clk", gaugeLabels.clock);
+  saveGaugeLabel("gl_ams", gaugeLabels.amsBase);
+  saveGaugeLabel("gl_dor", gaugeLabels.door);
+
+  // Network settings
+  prefs.putBool("net_dhcp", netSettings.useDHCP);
+  prefs.putString("net_ip", netSettings.staticIP);
+  prefs.putString("net_gw", netSettings.gateway);
+  prefs.putString("net_sn", netSettings.subnet);
+  prefs.putString("net_dns", netSettings.dns);
+  prefs.putBool("net_showip", netSettings.showIPAtStartup);
+  prefs.putBool("net_mdns", netSettings.mdnsEnabled);
+  prefs.putString("net_host", netSettings.hostname);
+  prefs.putString("net_tzstr", netSettings.timezoneStr);
+  prefs.putUChar("net_tzidx", netSettings.timezoneIndex);
+  prefs.putBool("net_24h", netSettings.use24h);
+  prefs.putUChar("net_datefmt", netSettings.dateFormat);
+
+  // Display power settings
+  prefs.putUShort("dp_fmins", dpSettings.finishDisplayMins);
+  prefs.putBool("dp_keepon", dpSettings.keepDisplayOn);
+  prefs.putBool("dp_clock", dpSettings.showClockAfterFinish);
+  prefs.putBool("dp_dack", dpSettings.doorAckEnabled);
+  prefs.putBool("dp_kps", dpSettings.keepPrintScreen);
+  prefs.putBool("dp_fintm", dpSettings.finishShowTime);
+  prefs.putBool("dp_night", dpSettings.nightModeEnabled);
+  prefs.putUChar("dp_nstart", dpSettings.nightStartHour);
+  prefs.putUChar("dp_nend", dpSettings.nightEndHour);
+  prefs.putUChar("dp_nbright", dpSettings.nightBrightness);
+  prefs.putUChar("dp_ssbright", dpSettings.screensaverBrightness);
+
+  // Tasmota power monitoring — numbered keys per plug
+  for (uint8_t i = 0; i < TASMOTA_PLUG_COUNT; i++) {
+    char k[12];
+    // Clamp on save too in case anything ever assigns out-of-range values
+    uint8_t pi = tasmotaSettings[i].pollInterval;
+    if (pi < 10 || pi > 60) pi = 10;
+    uint8_t ad = tasmotaSettings[i].autoOffDelayMin;
+    if (ad < 1 || ad > 240) ad = 10;
+
+    snprintf(k, sizeof(k), "tsm%u_en",  i); prefs.putBool(k, tasmotaSettings[i].enabled);
+    snprintf(k, sizeof(k), "tsm%u_pt",  i); prefs.putUChar(k, tasmotaSettings[i].plugType <= 3 ? tasmotaSettings[i].plugType : 0);
+    snprintf(k, sizeof(k), "tsm%u_po",  i); prefs.putUChar(k, tasmotaSettings[i].plugOutlet <= 3 ? tasmotaSettings[i].plugOutlet : 0);
+    snprintf(k, sizeof(k), "tsm%u_pe",  i); prefs.putUChar(k, tasmotaSettings[i].plugOutletExtra & 0x0F);
+    snprintf(k, sizeof(k), "tsm%u_ip",  i); prefs.putString(k, tasmotaSettings[i].ip);
+    snprintf(k, sizeof(k), "tsm%u_dm",  i); prefs.putUChar(k, tasmotaSettings[i].displayMode);
+    snprintf(k, sizeof(k), "tsm%u_pi",  i); prefs.putUChar(k, pi);
+    snprintf(k, sizeof(k), "tsm%u_ao",  i); prefs.putBool(k, tasmotaSettings[i].autoOffEnabled);
+    snprintf(k, sizeof(k), "tsm%u_aod", i); prefs.putBool(k, tasmotaSettings[i].autoOffCancelOnDoor);
+    snprintf(k, sizeof(k), "tsm%u_ad",  i); prefs.putUChar(k, ad);
+#if TASMOTA_PLUG_COUNT == 1
+    uint8_t a = tasmotaSettings[i].assignedSlot;
+    if (a != 255 && a >= MAX_ACTIVE_PRINTERS) a = 255;
+    snprintf(k, sizeof(k), "tsm%u_as",  i); prefs.putUChar(k, a);
+#endif
+  }
+  prefs.putString("tsm_cur", tasmotaCurrency);
+  {
+    float t = tasmotaTariffPerKwh;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 10.0f) t = 10.0f;
+    prefs.putFloat("tsm_tariff", t);
+  }
+
+  // Experimental dual-printer override on BOARD_LOW_RAM (local-only, not exported)
+  prefs.putBool("dualp", dualPrinterUnsafe);
+  // Experimental 4-printer override on BOARD_HAS_PSRAM (local-only, not exported)
+  prefs.putBool("quadp", quadPrinterBeta);
+
+  // C3 antenna workaround flag (local-only, not exported)
+  prefs.putBool("wifi_txcap", wifiTxCapped);
+
+  prefs.end();
+}
+
+// True when a slot's persistable state is indistinguishable from a
+// never-configured one, i.e. erasing its NVS keys and re-loading reconstructs
+// the exact same RAM config. Deliberately NOT isPrinterConfigured(): that
+// predicate also returns false for populated-but-disabled slots (4-printer
+// beta off, cloud slot awaiting cloudUserId), which must never be erased.
+static bool printerSlotIsFactoryDefault(const PrinterConfig& cfg) {
+  if (cfg.ip[0] || cfg.serial[0] || cfg.accessCode[0] || cfg.name[0] ||
+      cfg.cloudUserId[0])
+    return false;
+  if (cfg.mode != CONN_LOCAL || cfg.region != REGION_US) return false;
+  if (cfg.amsView || cfg.lightFlags != 0 || cfg.lightOffDelayMin != 5) return false;
+
+  uint8_t def[GAUGE_SLOT_COUNT];
+  defaultGaugeSlots(def);
+  if (memcmp(cfg.gaugeSlots, def, sizeof(def)) != 0) return false;
+
+  uint8_t idef[IDLE_SLOT_COUNT];
+  defaultIdleSlots(idef);
+  if (memcmp(cfg.idleSlots, idef, sizeof(idef)) != 0) return false;
+
+  for (uint8_t g = 0; g < LANDSCAPE_EXTRA_COUNT; g++)
+    if (cfg.landscapeExtras[g] != GAUGE_EMPTY) return false;
+  for (uint8_t g = 0; g < PORTRAIT_EXTRA_COUNT; g++)
+    if (cfg.portraitExtras[g] != GAUGE_EMPTY) return false;
+  return true;
+}
+
+// Drop every persisted key of one printer slot. Loading a slot with no keys
+// yields the factory defaults, so this is the storage-shape of "unconfigured".
+// The suffix list must stay in sync with savePrinterConfig, and every key in
+// it must be tested by printerSlotIsFactoryDefault - a key erased here that
+// the predicate does not check would silently lose the user's value.
+// prefsOpen: savePrinterConfig's isKey("wifiSSID") open-heuristic is unsafe
+// here (missing on a fresh partition even while prefs IS open), and a
+// mistaken end() would close the caller's handle.
+static void erasePrinterKeys(uint8_t index, bool prefsOpen) {
+  static const char* suffixes[] = {
+    "ip", "serial", "code", "name", "mode", "cuid", "region",
+    "slots", "lext", "pext", "islot", "amsv", "lflag", "ldly",
+  };
+  if (!prefsOpen) prefs.begin(NVS_NAMESPACE, false);
+  char key[16];
+  for (auto s : suffixes) {
+    snprintf(key, sizeof(key), "p%d_%s", index, s);
+    if (prefs.isKey(key)) prefs.remove(key);
+  }
+  if (!prefsOpen) prefs.end();
+}
+
+void savePrinterConfig(uint8_t index) {
+  if (index >= MAX_PRINTERS) return;
+
+  // Caller may already have prefs open, or we open ourselves
+  bool needOpen = !prefs.isKey("wifiSSID");  // heuristic check
+  if (needOpen) prefs.begin(NVS_NAMESPACE, false);
+
+  char key[16];
+  PrinterConfig& cfg = printers[index].config;
+
+  snprintf(key, sizeof(key), "p%d_ip", index);
+  prefs.putString(key, cfg.ip);
+
+  snprintf(key, sizeof(key), "p%d_serial", index);
+  prefs.putString(key, cfg.serial);
+
+  snprintf(key, sizeof(key), "p%d_code", index);
+  prefs.putString(key, cfg.accessCode);
+
+  snprintf(key, sizeof(key), "p%d_name", index);
+  prefs.putString(key, cfg.name);
+
+  snprintf(key, sizeof(key), "p%d_mode", index);
+  prefs.putUChar(key, cfg.mode);
+
+  snprintf(key, sizeof(key), "p%d_cuid", index);
+  prefs.putString(key, cfg.cloudUserId);
+
+  snprintf(key, sizeof(key), "p%d_region", index);
+  prefs.putUChar(key, cfg.region);
+
+  snprintf(key, sizeof(key), "p%d_slots", index);
+  prefs.putBytes(key, cfg.gaugeSlots, sizeof(cfg.gaugeSlots));
+  snprintf(key, sizeof(key), "p%d_lext", index);
+  prefs.putBytes(key, cfg.landscapeExtras, sizeof(cfg.landscapeExtras));
+  snprintf(key, sizeof(key), "p%d_pext", index);
+  prefs.putBytes(key, cfg.portraitExtras, sizeof(cfg.portraitExtras));
+  snprintf(key, sizeof(key), "p%d_islot", index);
+  prefs.putBytes(key, cfg.idleSlots, sizeof(cfg.idleSlots));
+
+  snprintf(key, sizeof(key), "p%d_amsv", index);
+  prefs.putBool(key, cfg.amsView);
+
+  snprintf(key, sizeof(key), "p%d_lflag", index);
+  prefs.putUChar(key, cfg.lightFlags);
+  snprintf(key, sizeof(key), "p%d_ldly", index);
+  prefs.putUChar(key, cfg.lightOffDelayMin);
+
+  if (needOpen) prefs.end();
+}
+
+#if defined(BOARD_IS_WS_P4_7B)
+#include "p4_runtime.h"
+#endif
+
+void clearPrinterConfig(uint8_t index) {
+  if (index >= MAX_PRINTERS) return;
+  PrinterConfig& cfg = printers[index].config;
+  resetPrinterConfig(cfg);
+#if !defined(BOARD_IS_WS_P4_7B)
+  erasePrinterKeys(index, false);
+#endif
+}
+
+void resetPrinterConfig(PrinterConfig& cfg) {
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.mode   = CONN_LOCAL;
+  cfg.region = REGION_US;
+  cfg.lightOffDelayMin = 5;  // sensible default after a slot is cleared
+  defaultGaugeSlots(cfg.gaugeSlots);
+  defaultIdleSlots(cfg.idleSlots);
+  memset(cfg.landscapeExtras, GAUGE_EMPTY, sizeof(cfg.landscapeExtras));
+  memset(cfg.portraitExtras, GAUGE_EMPTY, sizeof(cfg.portraitExtras));
+}
+
+void saveRotationSettings() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putUChar("rot_mode", rotState.mode);
+  prefs.putULong("rot_intv", rotState.intervalMs);
+  prefs.putBool("rot_split", rotState.splitEnabled);
+  prefs.putBool("rot_splitf", rotState.splitForce);
+  prefs.end();
+}
+
+void saveButtonSettings() {
+  sanitizeButtonPin();
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putUChar("btn_type", buttonType);
+  prefs.putUChar("btn_pin", buttonPin);
+  prefs.end();
+}
+
+void saveBuzzerSettings() {
+  sanitizeBuzzerPin();
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putBool("buz_on", buzzerSettings.enabled);
+  prefs.putUChar("buz_pin", buzzerSettings.pin);
+  prefs.putUChar("buz_qstart", buzzerSettings.quietStartHour);
+  prefs.putUChar("buz_qend", buzzerSettings.quietEndHour);
+  prefs.putBool("buz_click", buzzerSettings.buttonClick);
+  prefs.putBool("buz_bed_on", buzzerSettings.bedCooldownAlert);
+  prefs.putUChar("buz_bed_c", buzzerSettings.bedCooldownThresholdC);
+  prefs.end();
+}
+
+// Status LED — only path that writes LED to NVS. Always sanitizes first so
+// no invalid pin (peripheral conflict, input-only, flash, etc.) ever reaches
+// persistent storage. LED is intentionally NOT in saveSettings().
+void saveLedSettings() {
+  sanitizeLedPin();
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putBool ("led_on",  ledSettings.enabled);
+  prefs.putUChar("led_pin", ledSettings.pin);
+  prefs.putUChar("led_br",  ledSettings.brightness);
+
+  prefs.putUChar ("led_fx_md",  ledSettings.finishMode);
+  prefs.putUShort("led_fx_sec", ledSettings.finishSeconds);
+  prefs.putUChar ("led_fx_br",  ledSettings.finishBrightness);
+
+  prefs.putBool("led_auto_pr", ledSettings.autoOnWhilePrinting);
+  prefs.putBool("led_pause",   ledSettings.pauseBreathing);
+  prefs.putBool("led_err",     ledSettings.errorStrobe);
+  prefs.putUShort("led_err_sec", ledSettings.errorStrobeSeconds);
+
+  prefs.putUChar("led_drv",   ledSettings.driver);
+  prefs.putUChar("led_ping",  ledSettings.pinG);
+  prefs.putUChar("led_pinb",  ledSettings.pinB);
+  prefs.putBool ("led_anode", ledSettings.commonAnode);
+
+  prefs.putUInt("led_c_idl", ledSettings.colorIdle);
+  prefs.putUInt("led_c_prn", ledSettings.colorPrinting);
+  prefs.putUInt("led_c_pau", ledSettings.colorPaused);
+  prefs.putUInt("led_c_fin", ledSettings.colorFinished);
+  prefs.putUInt("led_c_err", ledSettings.colorError);
+  prefs.putBool("led_night", ledSettings.nightOff);
+  prefs.end();
+}
+
+void saveBatteryIndicatorSetting() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putBool("dsp_bat", dispSettings.showBatteryIndicator);
+  prefs.end();
+}
+
+void saveWifiTxCapped() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putBool("wifi_txcap", wifiTxCapped);
+  prefs.end();
+}
+
+void resetSettings() {
+  // Clear sensitive data from RAM before wiping NVS
+  memset(wifiPass, 0, sizeof(wifiPass));
+  for (int i = 0; i < MAX_PRINTERS; i++) {
+    memset(printers[i].config.accessCode, 0, sizeof(printers[i].config.accessCode));
+    memset(printers[i].config.cloudUserId, 0, sizeof(printers[i].config.cloudUserId));
+  }
+
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.clear();
+  prefs.end();
+#if !defined(BOARD_IS_WS_P4_7B)
+  ESP.restart();
+#endif
+}
+
+// ---------------------------------------------------------------------------
+//  Cloud token persistence
+//
+//  Stored as a blob ("cl_tok2"), not a string: an NVS string must fit into
+//  contiguous entries of a single 126-entry page, so a ~1 KB token is refused
+//  outright on a full or fragmented partition. Blob chunks are sized to each
+//  page's free tail and span pages. Older firmware wrote the "cl_token"
+//  string; reads fall back to it and a successful blob write retires it.
+//  Note the one-way step: firmware predating cl_tok2 will not see the token.
+// ---------------------------------------------------------------------------
+bool saveCloudToken(const char* token) {
+  size_t len = token ? strlen(token) : 0;
+  if (len == 0 || len >= CLOUD_TOKEN_MAX) return false;
+
+  prefs.begin(NVS_NAMESPACE, false);
+  // A refused write leaves the previous blob intact (NVS writes the new value
+  // before erasing the old one), so there is nothing to undo in that case.
+  bool ok = prefs.putBytes("cl_tok2", token, len) == len;
+  if (ok) {
+    // Read back and compare: a torn write must not report success. A blob
+    // that fails this check has already replaced whatever was there, so drop
+    // it - unverified bytes must not shadow a still-valid legacy token.
+    char* check = (char*)malloc(len);
+    if (check) {
+      ok = prefs.getBytes("cl_tok2", check, len) == len &&
+           memcmp(check, token, len) == 0;
+      free(check);
+      if (!ok) prefs.remove("cl_tok2");
+    }
+  }
+  if (ok) prefs.remove("cl_token");  // retire the legacy string, frees ~33 entries
+  prefs.end();
+  if (!ok) Serial.printf("NVS: cloud token write FAILED (%u bytes)\n", (unsigned)len);
+  return ok;
+}
+
+bool loadCloudToken(char* buf, size_t bufLen) {
+  if (buf == nullptr || bufLen == 0) return false;
+  buf[0] = '\0';
+  prefs.begin(NVS_NAMESPACE, true);
+  // isKey() first on purpose: getBytesLength() on a missing key logs an
+  // ESP_LOG error (visible in shipped builds), and this runs on every cloud
+  // connect, so a device still on the legacy string would spam
+  // "nvs_get_blob len fail: cl_tok2 NOT_FOUND" into the logs users paste
+  // into bug reports.
+  size_t len = prefs.isKey("cl_tok2") ? prefs.getBytesLength("cl_tok2") : 0;
+  if (len > 0) {
+    bool ok = true;
+    if (len < bufLen) {
+      ok = prefs.getBytes("cl_tok2", buf, bufLen) == len;
+      buf[ok ? len : 0] = '\0';
+    }
+    // else: an undersized probe buffer (the portal's "is a token stored?"
+    // check) - report presence without the payload; every consumer that uses
+    // the token passes a CLOUD_TOKEN_MAX-sized buffer.
+    prefs.end();
+    return ok;
+  }
+  String t = prefs.getString("cl_token", "");
+  prefs.end();
+  if (t.length() == 0) return false;
+  strlcpy(buf, t.c_str(), bufLen);
+  return true;
+}
+
+bool clearCloudToken() {
+#if defined(BOARD_IS_WS_P4_7B)
+  prefs.beginWriteVerification();
+#endif
+  if (!prefs.begin(NVS_NAMESPACE, false)) return false;
+  bool ok = true;
+  for (const char* key : {"cl_tok2", "cl_token", "cl_email", "cl_pass"})
+    if (prefs.isKey(key) && !prefs.remove(key)) ok = false;
+  prefs.end();
+#if defined(BOARD_IS_WS_P4_7B)
+  const bool verified = prefs.endWriteVerification();
+  return verified && ok;
+#else
+  return ok;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+//  NVS diagnostics + per-slot version record
+// ---------------------------------------------------------------------------
+void getNvsUsage(uint16_t& used, uint16_t& freeEntries, uint16_t& total) {
+  used = freeEntries = total = 0;
+  nvs_stats_t s;
+  if (nvs_get_stats(NULL, &s) != ESP_OK) return;
+  used        = (uint16_t)s.used_entries;
+  freeEntries = (uint16_t)s.free_entries;
+  total       = (uint16_t)s.total_entries;
+}
+
+// The app descriptor of an Arduino-core image carries the lib-builder's
+// project/version ("arduino-lib-builder", "esp-idf: v4.4.7"), identical for
+// every build - only its ELF sha256 is per-build. So the running firmware
+// notes its own FW_VERSION per app-slot label, tagged with the first 4 sha
+// bytes; the rollback UI trusts the other slot's note only while that tag
+// still matches the image actually sitting there.
+void recordBootSlotVersion() {
+  const esp_partition_t* run = esp_ota_get_running_partition();
+  const esp_app_desc_t*  d   = esp_ota_get_app_description();
+  if (!run || !d) return;
+
+  char key[16];
+  snprintf(key, sizeof(key), "ver_%s", run->label);
+  char val[48];
+  snprintf(val, sizeof(val), "%s|%02x%02x%02x%02x", FW_VERSION,
+           d->app_elf_sha256[0], d->app_elf_sha256[1],
+           d->app_elf_sha256[2], d->app_elf_sha256[3]);
+
+  prefs.begin(NVS_NAMESPACE, false);
+  if (prefs.getString(key, "") != val) prefs.putString(key, val);  // best effort
+  prefs.end();
+}
+
+bool loadSlotVersionNote(const char* label, char* buf, size_t bufLen) {
+  char key[16];
+  snprintf(key, sizeof(key), "ver_%s", label);
+  prefs.begin(NVS_NAMESPACE, true);
+  String v = prefs.getString(key, "");
+  prefs.end();
+  if (v.length() == 0) return false;
+  strlcpy(buf, v.c_str(), bufLen);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Account credentials for on-device sign-in
+//
+//  The email is kept so the portal can show who is signed in and so a stored
+//  password has something to pair with. The password is optional and only
+//  exists to re-run sign-in when the token expires; accounts with 2FA cannot
+//  use it, and the sign-in code deletes it when it discovers that.
+// ---------------------------------------------------------------------------
+void saveCloudEmail(const char* email) {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putString("cl_email", email);
+  prefs.end();
+}
+
+bool loadCloudEmail(char* buf, size_t bufLen) {
+  prefs.begin(NVS_NAMESPACE, true);
+  String e = prefs.getString("cl_email", "");
+  prefs.end();
+  if (e.length() == 0) return false;
+  strlcpy(buf, e.c_str(), bufLen);
+  return true;
+}
+
+void saveCloudPassword(const char* password) {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putString("cl_pass", password);
+  prefs.end();
+}
+
+bool loadCloudPassword(char* buf, size_t bufLen) {
+  prefs.begin(NVS_NAMESPACE, true);
+  String p = prefs.getString("cl_pass", "");
+  prefs.end();
+  if (p.length() == 0) return false;
+  strlcpy(buf, p.c_str(), bufLen);
+  return true;
+}
+
+void clearCloudPassword() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.remove("cl_pass");
+  prefs.end();
+}
+
+#if defined(BOARD_IS_WS_P4_7B)
+bool p4StoreCloudLogin(const char* email, const char* password, bool savePassword) {
+  prefs.beginWriteVerification();
+  if (!prefs.begin(NVS_NAMESPACE, false)) {
+    prefs.endWriteVerification();
+    return false;
+  }
+  if (email && email[0]) prefs.putString("cl_email", email);
+  else prefs.remove("cl_email");
+  // Two-factor and passwordless restores must not retain an old secret.
+  if (savePassword && password && password[0]) prefs.putString("cl_pass", password);
+  else prefs.remove("cl_pass");
+  prefs.end();
+  return prefs.endWriteVerification();
+}
+
+bool p4DeleteCloudToken() {
+  prefs.beginWriteVerification();
+  if (!prefs.begin(NVS_NAMESPACE, false)) {
+    prefs.endWriteVerification();
+    return false;
+  }
+  prefs.remove("cl_tok2");
+  prefs.remove("cl_token");
+  prefs.end();
+  return prefs.endWriteVerification();
+}
+
+#endif
