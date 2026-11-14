@@ -1017,6 +1017,24 @@ static void handleDebug() {
   touch["valid"] = contact.valid;
   touch["x"] = contact.x;
   touch["y"] = contact.y;
+  // Bus-level state behind the counters above: `polls` proves the poller is
+  // alive, `cmd_reg`/`status` say whether the controller is asleep or simply
+  // not reporting. Safe here - touchRegisterDump() never touches I2C.
+  {
+    const TouchRegisterDump rd = touchRegisterDump();
+    JsonObject regs = doc["touch_regs"].to<JsonObject>();
+    regs["polls"] = rd.polls;
+    regs["addr"] = rd.addr;
+    regs["status"] = rd.status;
+    regs["status_restart"] = rd.statusRestart;
+    regs["cmd_reg"] = rd.cmdReg;
+    regs["config_version"] = rd.configVersion;
+    regs["refresh_rate"] = rd.refreshRate;
+    regs["fw"] = String(rd.fwHigh) + "." + String(rd.fwLow);
+    regs["checksum"] = rd.checksum;
+    regs["int_level"] = rd.intLevel;
+    regs["product"] = rd.product;
+  }
   P4UiStatus ui{};
   p4HttpUiSnapshot(ui);
   doc["p4_dashboard"] = ui.dashboard;

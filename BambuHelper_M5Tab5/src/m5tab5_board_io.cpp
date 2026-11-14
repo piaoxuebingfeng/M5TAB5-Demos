@@ -138,8 +138,22 @@ void m5tab5CameraReset(bool release) {
   setOutputBit(IO1, outIo1, 6, release);
 }
 
-void m5tab5RadioPower(bool on) {
+// TP_RST lives on PI4IOE-1 P5. The display bring-up pulses it as well, but that
+// happens ~2 s before the touch driver probes; an independent pulse here is what
+// guarantees the controller is in a known power-up mode at probe time.
+void m5tab5TouchReset(bool intHigh) {
   if (!ready) return;
+  pinMode(M5TAB5_TOUCH_INT, OUTPUT);
+  digitalWrite(M5TAB5_TOUCH_INT, intHigh ? HIGH : LOW);
+  delay(2);
+  setOutputBit(IO1, outIo1, M5TAB5_IO1_TP_RST, false);   // assert reset
+  delay(12);
+  setOutputBit(IO1, outIo1, M5TAB5_IO1_TP_RST, true);    // release; INT latched
+  delay(120);                                            // GT911 boot
+  pinMode(M5TAB5_TOUCH_INT, INPUT_PULLUP);
+}
+
+void m5tab5RadioPower(bool on) {  if (!ready) return;
   if (on) {
     // Same state M5GFX leaves the C6 rail in: output register high, pin used
     // as an input with a pull-up so the rail is enabled without back-driving.

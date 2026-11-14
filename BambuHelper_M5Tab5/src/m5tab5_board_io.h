@@ -40,6 +40,10 @@ bool m5tab5IoReady();
 void m5tab5SpeakerEnable(bool on);     // 0x43 P2, NS4150B amplifier
 void m5tab5CameraReset(bool release);  // 0x43 P6, active low (left released)
 void m5tab5RadioPower(bool on);        // 0x44 P0, ESP32-C6 supply
+// Pulse TP_RST through PI4IOE-1 P5 with a defined level on TP_INT, which is
+// what the GT911 latches its I2C address (and its power-up mode) from:
+// intHigh = true -> 0x14, intHigh = false -> 0x5D.
+void m5tab5TouchReset(bool intHigh);
 
 // INA226 @0x41 on the same system bus, wired across the battery input. Used
 // for brown-out forensics: the Tab5 can drop out seconds into boot, before the

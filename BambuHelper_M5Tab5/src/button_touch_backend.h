@@ -52,6 +52,27 @@ struct TouchDiagnostics {
   uint32_t readErrors;
 };
 TouchDiagnostics touchDiagnostics();
+
+// Raw GT911 state for bring-up: everything needed to tell "asleep" from
+// "mis-configured" from "never polled" without a logic analyser.
+struct TouchRegisterDump {
+  uint32_t polls;        // touchPoll() invocations since boot
+  uint8_t  addr;         // address actually in use (0x14 or 0x5D)
+  uint8_t  status;       // 0x814E read with STOP in between
+  uint8_t  statusRestart;// 0x814E read with a repeated START
+  uint8_t  cmdReg;       // 0x8040: 0x00 normal, 0x05 sleep
+  uint8_t  configVersion;// 0x8047
+  uint8_t  configVerRS;  // 0x8047 read with a repeated START
+  uint8_t  refreshRate;  // 0x8056 low nibble + 5 (ms)
+  uint8_t  fwHigh;       // 0x8144
+  uint8_t  fwLow;        // 0x8145
+  uint8_t  checksum;     // 0x80FF
+  int      intLevel;     // sampled GT911_INT pin
+  char     product[5];   // 0x8140..0x8143
+};
+TouchRegisterDump touchRegisterDump();
+// Issue the documented wake pulse (INT low ~58 ms). Idempotent.
+void touchWake();
 #if defined(BOARD_IS_WS_P4_7B)
 struct TouchContact { bool down; bool valid; uint16_t x; uint16_t y; };
 // Snapshot of the same poll consumed by button.cpp; never polls I2C twice.
