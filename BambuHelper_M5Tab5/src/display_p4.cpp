@@ -293,6 +293,13 @@ bool sameLabel(const char* a, const char* b) {
   return !*a && !*b;
 }
 
+// Lit while a finger is resting on a header icon. The Tab5 has neither a buzzer
+// nor a vibration motor, so the only way a tap can acknowledge itself before the
+// finger lifts is on the glass: the icon turns green on press and goes back to
+// normal on release. Set from the touch path (see p4SetHeaderPress), consumed
+// here while the frame is rasterised into the PSRAM sprite.
+int8_t headerPressIcon = 0;   // 0 = none, 1 = info, 2 = gear
+
 void header(Canvas& cv, const PrinterSlot& p, const P4DashboardView& v, time_t now, const char* deviceIp) {
   char name[100];
   // A name the user typed as the model name ("P1S") would otherwise render as
@@ -303,7 +310,12 @@ void header(Canvas& cv, const PrinterSlot& p, const P4DashboardView& v, time_t n
   else
     snprintf(name, sizeof(name), "%s · %s", p.config.name[0] ? p.config.name : "打印机", model);
   constexpr int headerAxis = 38;
-  int end = LEFT + cv.text(name, LEFT, headerAxis, 320, FG, FONT_CJK, 1, BG, true);
+  // The name row doubles as the printer switch, and it is the one tap target on
+  // this screen with no visual acknowledgement of its own - the content below
+  // only changes once the switch actually happens. Tint the text while a finger
+  // is on it so a tap registers even when the next slot looks identical.
+  const uint16_t nameInk = headerPressIcon == 3 ? GREEN : FG;
+  int end = LEFT + cv.text(name, LEFT, headerAxis, 320, nameInk, FONT_CJK, 1, BG, true);
   // The name row doubles as the multi-printer switch (see p4DashboardGesture:
   // a tap left of x=790 on the home page asks for the next configured slot).
   // Draw the caret only when a second slot is actually ready, so a
@@ -321,13 +333,15 @@ void header(Canvas& cv, const PrinterSlot& p, const P4DashboardView& v, time_t n
   if (now > 1700000000) { struct tm local; localtime_r(&now, &local); strftime(clock, sizeof(clock), "%H:%M", &local); }
   cv.text(clock, 814, 22, 86, FG, FONT_BODY_2X, .85f);
   // Draw icons with primitives so they remain crisp at the native resolution.
+  const uint16_t infoInk = headerPressIcon == 1 ? GREEN : FG;
+  const uint16_t gearInk = headerPressIcon == 2 ? GREEN : FG;
   if (v.page >= 0) {
-    cv.g.drawLine(928, 27, 914, 38, FG); cv.g.drawLine(914, 38, 928, 49, FG);
-    cv.g.drawLine(914, 38, 941, 38, FG);
+    cv.g.drawLine(928, 27, 914, 38, infoInk); cv.g.drawLine(914, 38, 928, 49, infoInk);
+    cv.g.drawLine(914, 38, 941, 38, infoInk);
   } else {
-    cv.g.drawCircle(INFO_X,38,12,FG);
-    cv.g.fillCircle(INFO_X,31,1,FG);
-    cv.g.fillRect(INFO_X-1,36,3,10,FG);
+    cv.g.drawCircle(INFO_X,38,12,infoInk);
+    cv.g.fillCircle(INFO_X,31,1,infoInk);
+    cv.g.fillRect(INFO_X-1,36,3,10,infoInk);
 #if HAS_HMS_UI
     // Alert badge: a dot on the info icon, never text on the print page.
     // Same bar the Bambu app clears (errorBadgeFor): connection-time
@@ -353,12 +367,12 @@ void header(Canvas& cv, const PrinterSlot& p, const P4DashboardView& v, time_t n
       const float radius = corner == 0 || corner == 3 ? 9 : 12;
       int x=0,y=0; gearPoint(a,radius,x,y);
       if (!i && !corner) { firstX=x; firstY=y; }
-      else cv.g.drawLine(previousX,previousY,x,y,FG);
+      else cv.g.drawLine(previousX,previousY,x,y,gearInk);
       previousX=x; previousY=y;
     }
   }
-  cv.g.drawLine(previousX,previousY,firstX,firstY,FG);
-  cv.g.drawCircle(SETTINGS_X,38,4,FG);
+  cv.g.drawLine(previousX,previousY,firstX,firstY,gearInk);
+  cv.g.drawCircle(SETTINGS_X,38,4,gearInk);
 }
 
 void printerPanel(Canvas& cv, const PrinterSlot& p, const P4DashboardView& view, time_t now) {
@@ -745,6 +759,12 @@ void followP4ActiveAms(P4DashboardView& v,const AmsState& a){
   }
   if(a.activeTray==254&&a.vtPresent)v.amsPage=page;
 }
+// Called from the touch path while a finger is down on the info or gear icon:
+// 0 = none, 1 = info, 2 = gear. The next rasterisation tints that icon, so the
+// press is visible on the glass before the finger lifts - the closest thing this
+// board has to haptic feedback.
+void p4SetHeaderPress(int8_t icon) { headerPressIcon = icon; }
+
 P4Action p4DashboardGesture(P4DashboardView& v,const BambuState& s,p4ui::Gesture gesture,p4ui::Point p) {
   using namespace p4ui;
   if(gesture==Gesture::None || p.x<0 || p.x>=W || p.y<0 || p.y>=H)return P4Action::None;
@@ -766,9 +786,18 @@ P4Action p4DashboardGesture(P4DashboardView& v,const BambuState& s,p4ui::Gesture
 #endif
     return P4Action::None;
   }
-  if(p.y<68) {
-    if(p.x>=SETTINGS_X-13&&p.x<W) v.page=4;
-    else if(p.x>=DETAILS_X&&p.x<DETAILS_X+DETAILS_W&&p.y>=DETAILS_Y&&p.y<DETAILS_Y+DETAILS_H)v.page=v.page>=0?-1:0;
+  if(p.y<74) {
+    // Header row. Everything here is authored on the 1024x600 canvas the Tab5
+    // scales 1.2x, so the old boxes were only ~6 mm of glass against a ~10 mm
+    // fingertip - and they did not even touch: the gear started at 967 while
+    // the info box ended at 950, leaving a 17 px strip (~2.4 mm) that did
+    // nothing at all. Taps landing on an icon's edge fell into that gap, which
+    // is why the gear felt like it only worked one time in three. The two
+    // targets now share the 950 edge and the gear runs to the panel edge
+    // (~11 mm); the info box keeps its 898 start because the clock is drawn at
+    // 814..900 and must not be swallowed.
+    if(p.x>=950) v.page=4;
+    else if(p.x>=898) v.page=v.page>=0?-1:0;
     else if(p.x<790&&v.page<0)return P4Action::NextPrinter;
     return P4Action::None;
   }

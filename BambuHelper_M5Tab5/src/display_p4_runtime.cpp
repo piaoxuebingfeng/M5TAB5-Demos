@@ -87,6 +87,28 @@ bool handleP4DashboardTouch() {
     lastTraceDown = contact.down;
   }
 #endif
+  // Header-icon press feedback. The Tab5 has no buzzer and no vibration motor,
+  // so the only way to tell the user "your finger is on the gear" before the
+  // page changes is to light the icon up on the glass. This runs ahead of the
+  // `enabled` early-return so a finger that lifts mid-transition still clears
+  // the tint instead of leaving it stuck on. Same 950/898 split as
+  // p4DashboardGesture - keep the two in sync if the boxes ever move again.
+  {
+    static int8_t pressedIcon = 0;
+    int8_t icon = 0;
+    if (enabled && contact.down && contact.valid && point.y < 74) {
+      if (point.x >= 950) icon = 2;
+      else if (point.x >= 898) icon = 1;
+      // The name row only switches printers from the home page; on a detail
+      // page the same pixels do nothing, so they must not light up either.
+      else if (point.x < 790 && view.page < 0) icon = 3;
+    }
+    if (icon != pressedIcon) {
+      pressedIcon = icon;
+      p4SetHeaderPress(icon);
+      drawn = false;   // force updateP4Dashboard() to rasterise a fresh frame
+    }
+  }
   const auto gesture = touch.update(contact.down, contact.valid, point, millis(), enabled &&
     (previousSlot == rotState.displayIndex || previousSlot == 255) &&
     (previousRotation == dispSettings.rotation || previousRotation == 255));

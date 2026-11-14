@@ -98,7 +98,13 @@ inline Gesture classify(Point start, Point end, uint32_t duration, int excursion
   if (duration > 1500) return Gesture::None;
   if (ax >= 64 && ax > ay * 2) return dx < 0 ? Gesture::Left : Gesture::Right;
   if (ay >= 64 && ay > ax * 2) return dy < 0 ? Gesture::Up : Gesture::Down;
-  return excursion <= 24 && duration >= 40 && duration <= 700 ? Gesture::Tap : Gesture::None;
+  // A tap is a press that stays roughly put. 24 authored px is only ~2.9 mm of
+  // glass once the Tab5's 1.2x scale is applied, and a fingertip wobbles more
+  // than that by itself, so short taps on the header icons were being thrown
+  // away as "not a gesture" - the tap simply never reached the hit test. 46 px
+  // is ~5.5 mm and still sits well below the 64 px a deliberate swipe needs on
+  // its dominant axis, so swipes keep classifying as swipes.
+  return excursion <= 46 && duration >= 30 && duration <= 800 ? Gesture::Tap : Gesture::None;
 }
 // A wake gesture, bus failure, multitouch or modal transition must never turn
 // its eventual release into a navigation tap on a newly visible screen.

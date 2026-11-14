@@ -16,6 +16,10 @@ struct P4DashboardView {
 enum class P4Action { None, NextPrinter };
 P4Action p4DashboardGesture(P4DashboardView& view, const BambuState& state,
                             p4ui::Gesture gesture, p4ui::Point origin);
+// Tint the header icons while a finger is on them (0 = none, 1 = info, 2 = gear).
+// The board has no buzzer or vibration motor, so a coloured icon is the only
+// immediate "your tap registered" signal available before the page changes.
+void p4SetHeaderPress(int8_t icon);
 uint16_t accentP4(const BambuState& state);
 // Replace only the 8px progress strip during animation; the full native
 // framebuffer remains intact. This adds no TLS session or extra frame buffer.
