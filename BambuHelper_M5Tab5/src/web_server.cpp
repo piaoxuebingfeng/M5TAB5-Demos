@@ -413,7 +413,7 @@ static void handleSavePrinter() {
     return;
   }
 #endif
-#ifdef BOARD_HAS_PSRAM
+#if defined(BOARD_HAS_PSRAM) && !defined(BOARD_IS_WS_P4_7B)
   if (slot > 1 && !quadPrinterBeta) {
     server.send(200, "application/json",
       "{\"status\":\"error\",\"message\":\"Enable experimental 4-printer mode under WiFi & System > Danger zone to configure printer 3/4.\"}");
@@ -580,7 +580,7 @@ static void handleSaveGaugeLayout() {
     return;
   }
 #endif
-#ifdef BOARD_HAS_PSRAM
+#if defined(BOARD_HAS_PSRAM) && !defined(BOARD_IS_WS_P4_7B)
   if (slot > 1 && !quadPrinterBeta) {
     server.send(200, "application/json",
       "{\"status\":\"error\",\"message\":\"Enable experimental 4-printer mode to configure printer 3/4.\"}");
@@ -1041,6 +1041,11 @@ static void handleDebug() {
   doc["p4_page"] = ui.page;
   doc["p4_ams_page"] = ui.amsPage;
   doc["p4_image"] = ui.cameraImage ? "camera" : "printer";
+  // Which slot the dashboard is rendering and how it got there. `ui.slot` is
+  // the value the UI task publishes (p4_ui_service.cpp), not this file's own
+  // p4Web scratch copy of rotState - reading the latter would always report 0.
+  doc["display_slot"] = ui.slot;
+  doc["rotate_mode"] = (uint8_t)p4UiSettings.rotState.mode;
   const ThumbDiagnostics thumb = thumbDiagnostics(rotState.displayIndex);
   JsonObject image = doc["thumbnail"].to<JsonObject>();
   image["ready"] = thumb.ready;

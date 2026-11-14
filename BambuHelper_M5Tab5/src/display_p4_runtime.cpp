@@ -100,11 +100,20 @@ bool handleP4DashboardTouch() {
     buzzerPlayClick(); ledOnUserInteraction(); lastInteraction = millis();
     const auto action = p4DashboardGesture(view, displayedPrinter().state, gesture, touch.origin());
     if (action == P4Action::NextPrinter) {
+      // A tap on the name row is an explicit choice: hold it far longer than
+      // the 60 s "peek" a plain touch grants, otherwise Smart mode snaps the
+      // view back to the printing slot a minute later and the switch looks
+      // like it never took effect.
+      constexpr uint32_t kManualSwitchHoldMs = 600000;   // 10 minutes
       for (uint8_t i=1;i<MAX_PRINTERS;++i) {
         const uint8_t next=(rotState.displayIndex+i)%MAX_PRINTERS;
         if (isPrinterConfigured(next)) {
           rotState.displayIndex=next; rotState.lastRotateMs=millis();
-          view=P4DashboardView{}; drawn=false; triggerDisplayTransition(); break;
+          rotState.displayHoldUntilMs=millis()+kManualSwitchHoldMs;
+          view=P4DashboardView{}; drawn=false; triggerDisplayTransition();
+          Serial.printf("[p4] tap-switch printer -> slot %u (%s)\n",
+                        (unsigned)next, printers[next].config.name);
+          break;
         }
       }
     }

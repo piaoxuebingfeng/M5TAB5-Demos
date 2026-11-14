@@ -48,7 +48,13 @@
 #ifndef BOARD_HAS_PSRAM
 #define BOARD_HAS_PSRAM 1
 #endif
-#define MAX_ACTIVE_PRINTERS 2
+// Simultaneous TLS+MQTT sessions. The P4 path keeps every per-slot buffer in
+// PSRAM (32 MB on the Tab5), so the no-PSRAM ceiling of two does not apply.
+// Three covers a P1S + A1 + A1 mini fleet; raise to MAX_PRINTERS (4) if a
+// fourth machine is ever added. Each session is ~40 KB MQTT ring + ~40-50 KB
+// mbedTLS, plus its own Wi-Fi air time - the 11 dBm cap in wifi_manager keeps
+// the peak draw inside a 5V/2A supply.
+#define MAX_ACTIVE_PRINTERS 3
 
 // --- Display --------------------------------------------------------------
 // Stage 1 deliberately keeps the original layout selector so the ported UI

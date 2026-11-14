@@ -243,9 +243,12 @@ static bool resolvePlaceholder(const char* name, String& out) {
       // toggleDualPrinterMode() clears the inline style without a reload.
       if (i == 1 && !dualPrinterUnsafe) out += " style=\"display:none\"";
 #endif
-#ifdef BOARD_HAS_PSRAM
+#if defined(BOARD_HAS_PSRAM) && !defined(BOARD_IS_WS_P4_7B)
       // Slots 2-3 stay hidden until the experimental 4-printer toggle enables
       // them; toggleQuadPrinterMode() clears the inline style without a reload.
+      // The P4 path skips this: its slot buffers live in PSRAM and
+      // MAX_ACTIVE_PRINTERS already caps the count, so the beta opt-in only
+      // hides slots the board can actually run.
       if (i >= 2 && !quadPrinterBeta) out += " style=\"display:none\"";
 #endif
       out += ">Printer " + String(i + 1) + "</button>";
@@ -259,7 +262,7 @@ static bool resolvePlaceholder(const char* name, String& out) {
 #ifdef BOARD_LOW_RAM
       if (i == 1 && !dualPrinterUnsafe) out += " style=\"display:none\"";
 #endif
-#ifdef BOARD_HAS_PSRAM
+#if defined(BOARD_HAS_PSRAM) && !defined(BOARD_IS_WS_P4_7B)
       if (i >= 2 && !quadPrinterBeta) out += " style=\"display:none\"";
 #endif
       out += "><span id=\"topStatusText" + String(i) + "\">-</span></span>";
@@ -285,7 +288,7 @@ static bool resolvePlaceholder(const char* name, String& out) {
     out += " onchange=\"toggleDualPrinterMode(this.checked)\">";
     out += "<label for=\"dualp\">Enable 2-printer mode (experimental on low-RAM boards: two simultaneous TLS+MQTT sessions may exhaust the heap and crash the device)</label>";
     out += "</label>";
-#elif defined(BOARD_HAS_PSRAM)
+#elif defined(BOARD_HAS_PSRAM) && !defined(BOARD_IS_WS_P4_7B)
     out  = "<label class=\"check-row\">";
     out += "<input type=\"checkbox\" id=\"quadp\" value=\"1\" ";
     if (quadPrinterBeta) out += "checked";

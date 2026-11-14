@@ -247,6 +247,16 @@ void drawP4Progress(lgfx::LovyanGFX& g, int x, int y, int width,
 
 namespace {
 bool known(const BambuState& s, uint32_t flag) { return (s.p4Known & flag) != 0; }
+// Same rule bambu_mqtt.cpp applies for "this slot can actually connect": a
+// cloud slot needs a serial plus the account id the worker fills in, a LAN slot
+// needs a serial plus an address. Used only to decide whether the header advertises
+// a switch, never to gate any traffic.
+bool slotReady(uint8_t slot) {
+  if (slot >= MAX_ACTIVE_PRINTERS) return false;
+  const PrinterConfig& cfg = printers[slot].config;
+  return isCloudMode(cfg.mode) ? (cfg.serial[0] && cfg.cloudUserId[0])
+                               : (cfg.serial[0] && cfg.ip[0]);
+}
 void duration(char* out, size_t n, uint16_t minutes) {
   if (minutes >= 60) snprintf(out, n, "%u小时 %02u分", minutes / 60, minutes % 60);
   else snprintf(out, n, "%u分钟", minutes);
@@ -265,9 +275,30 @@ const char* wifiQuality(int rssi) {
 
 void header(Canvas& cv, const PrinterSlot& p, const P4DashboardView& v, time_t now, const char* deviceIp) {
   char name[100];
-  snprintf(name, sizeof(name), "%s · %s", p.config.name[0] ? p.config.name : "打印机", modelFor(p.config).name);
+  // A name the user typed as the model name ("P1S") would otherwise render as
+  // "P1S · P1S"; keep the model only when it adds information.
+  const char* model = modelFor(p.config).name;
+  if (p.config.name[0] && model && strcasecmp(p.config.name, model) == 0)
+    snprintf(name, sizeof(name), "%s", p.config.name);
+  else
+    snprintf(name, sizeof(name), "%s · %s", p.config.name[0] ? p.config.name : "打印机", model);
   constexpr int headerAxis = 38;
   int end = LEFT + cv.text(name, LEFT, headerAxis, 320, FG, FONT_CJK, 1, BG, true);
+  // The name row doubles as the multi-printer switch (see p4DashboardGesture:
+  // a tap left of x=790 on the home page asks for the next configured slot).
+  // Draw the caret only when a second slot is actually ready, so a
+  // single-printer setup keeps the original header pixel-for-pixel.
+  uint8_t readySlots = 0;
+  for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; ++i) if (slotReady(i)) ++readySlots;
+  if (readySlots > 1) {
+    // +20 rather than +10: Canvas::text() reports textWidth() for the fitted
+    // string, and the CJK fallback face advances slightly wider than it
+    // measures, so a 10px gap drew the caret on top of the last glyph.
+    const int cx = end + 20, cy = headerAxis;
+    cv.g.drawLine(cx, cy - 4, cx + 5, cy + 2, FG);
+    cv.g.drawLine(cx + 5, cy + 2, cx + 10, cy - 4, FG);
+    end = cx + 16;
+  }
   if (deviceIp && deviceIp[0]) cv.text(deviceIp, end + 28, headerAxis, std::max(0, 784 - end - 28), MUTED, FONT_CJK, 1, BG, true);
   char clock[16] = "--:--";
   if (now > 1700000000) { struct tm local; localtime_r(&now, &local); strftime(clock, sizeof(clock), "%H:%M", &local); }
