@@ -1423,8 +1423,10 @@ static void sendGzipAsset(const char* contentType, const uint8_t* data, size_t l
   server.send_P(200, contentType, (PGM_P)data, len);
 }
 
-static void handleAppCss() { sendGzipAsset("text/css", WEB_APP_CSS_GZ, WEB_APP_CSS_GZ_LEN); }
-static void handleAppJs()  { sendGzipAsset("application/javascript", WEB_APP_JS_GZ, WEB_APP_JS_GZ_LEN); }
+// The JS carries the zh-CN string table, so say so explicitly rather than
+// relying on the document charset being inherited by the script.
+static void handleAppCss() { sendGzipAsset("text/css; charset=utf-8", WEB_APP_CSS_GZ, WEB_APP_CSS_GZ_LEN); }
+static void handleAppJs()  { sendGzipAsset("application/javascript; charset=utf-8", WEB_APP_JS_GZ, WEB_APP_JS_GZ_LEN); }
 
 static void handleCloudLogout() {
 #if defined(BOARD_IS_WS_P4_7B)

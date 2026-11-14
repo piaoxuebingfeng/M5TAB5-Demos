@@ -37,6 +37,47 @@ static const char PAGE_AP_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>BambuHelper Setup</title>
+<script>
+/* AP-mode page language. Same keys/localStorage name as the main page, but a
+   different origin (the AP has its own IP), so the choice is made again here -
+   it follows the browser locale unless the user taps the toggle. */
+(function(){
+  var l='en';
+  try{ l=localStorage.getItem('bh-lang'); }catch(e){}
+  if(l!=='zh'&&l!=='en') l=((navigator.language||'').toLowerCase().indexOf('zh')===0)?'zh':'en';
+  window.ALANG=l;
+  try{ document.documentElement.lang=(l==='zh'?'zh-CN':'en'); }catch(e){}
+  window.AP_I18N={
+    'Initial Setup':'初始设置',
+    'Connect to WiFi Network':'连接 WiFi 网络',
+    'Enter your WiFi credentials. After saving, the device will restart and connect to your network. You can then access the full settings at the device\'s IP address.':'输入 WiFi 账号密码。保存后设备会重启并连接到你的网络，之后可通过设备 IP 地址访问完整设置。',
+    'Nearby networks':'附近的网络',
+    'Rescan':'重新扫描',
+    'WiFi SSID':'WiFi 名称',
+    'WiFi Password':'WiFi 密码',
+    'Show password':'显示密码',
+    'Save WiFi & Restart':'保存 WiFi 并重启',
+    'Your WiFi network name':'你的 WiFi 名称',
+    'WiFi password':'WiFi 密码',
+    'Scanning...':'扫描中…',
+    'Scan unavailable - type the name below':'扫描不可用 - 请在下方手动输入',
+    'Choose a network...':'选择网络…',
+    'No networks found - type the name below':'未找到网络 - 请在下方手动输入',
+    'Scan failed - type the name below':'扫描失败 - 请在下方手动输入',
+    'Enter SSID':'输入 SSID',
+    'Saving...':'保存中…',
+    'WiFi Saved!':'WiFi 已保存！',
+    'Restarting... Connect to your WiFi and open the device IP address in a browser.':'正在重启… 请连接你的 WiFi，并在浏览器中打开设备 IP 地址。',
+    'Connection error':'连接错误',
+    ', open':', 开放'
+  };
+  window.tr=function(s){
+    if(window.ALANG!=='zh'||!s) return s;
+    var v=window.AP_I18N[s];
+    return (v===undefined)?s:v;
+  };
+})();
+</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0D1117;color:#E6EDF3;padding:16px;max-width:420px;margin:0 auto}
@@ -55,7 +96,7 @@ select{width:100%;padding:8px 10px;border:1px solid #30363D;border-radius:6px;ba
 </style>
 </head><body>
 <h1>BambuHelper</h1>
-<p class="sub">Initial Setup</p>
+<p class="sub">Initial Setup <a href="#" id="langBtn" style="color:#58A6FF;float:right;text-decoration:none;font-size:12px;padding-top:4px">中文</a></p>
 <div class="card" id="fail" hidden style="border-color:#F85149">
   <h2 style="color:#F85149" id="failT"></h2>
   <p style="font-size:13px;line-height:1.45" id="failM"></p>
@@ -81,34 +122,44 @@ select{width:100%;padding:8px 10px;border:1px solid #30363D;border-radius:6px;ba
 function pickSsid(v){ if(v) document.getElementById('ssid').value=v; }
 function scanWifi(){
   var sel=document.getElementById('ssidList');
-  sel.innerHTML='<option value="">Scanning...</option>';
+  sel.innerHTML='<option value="">'+tr('Scanning...')+'</option>';
   fetch('/wifi/scan').then(function(r){return r.json();}).then(function(list){
     if(list && !Array.isArray(list)){
-      sel.innerHTML='<option value="">Scan unavailable - type the name below</option>';
+      sel.innerHTML='<option value="">'+tr('Scan unavailable - type the name below')+'</option>';
       return;
     }
-    sel.innerHTML='<option value="">Choose a network...</option>';
+    sel.innerHTML='<option value="">'+tr('Choose a network...')+'</option>';
     (list||[]).forEach(function(n){
       if(!n||!n.ssid)return;
       var o=document.createElement('option');
       o.value=n.ssid;
-      o.textContent=n.ssid+'  ('+n.rssi+' dBm'+(n.enc?'':', open')+')';
+      o.textContent=n.ssid+'  ('+n.rssi+' dBm'+(n.enc?'':tr(', open'))+')';
       sel.appendChild(o);
     });
-    if(!list||!list.length) sel.innerHTML='<option value="">No networks found - type the name below</option>';
-  }).catch(function(){ sel.innerHTML='<option value="">Scan failed - type the name below</option>'; });
+    if(!list||!list.length) sel.innerHTML='<option value="">'+tr('No networks found - type the name below')+'</option>';
+  }).catch(function(){ sel.innerHTML='<option value="">'+tr('Scan failed - type the name below')+'</option>'; });
 }
 function saveWifi(){
   var s=document.getElementById('ssid').value,p=document.getElementById('pass').value;
-  if(!s){document.getElementById('msg').innerHTML='<span style="color:#F85149">Enter SSID</span>';return;}
-  document.getElementById('msg').innerHTML='<span style="color:#58A6FF">Saving...</span>';
+  if(!s){document.getElementById('msg').innerHTML='<span style="color:#F85149">'+tr('Enter SSID')+'</span>';return;}
+  document.getElementById('msg').innerHTML='<span style="color:#58A6FF">'+tr('Saving...')+'</span>';
   var d=new URLSearchParams();d.append('ssid',s);d.append('pass',p);
   fetch('/save/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})
-    .then(function(){document.body.innerHTML='<div style="text-align:center;padding-top:80px"><h2 style="color:#3FB950">WiFi Saved!</h2><p style="color:#8B949E;margin-top:10px">Restarting... Connect to your WiFi and open the device IP address in a browser.</p></div>';})
-    .catch(function(e){document.getElementById('msg').style.color='#F85149';document.getElementById('msg').textContent='Connection error';console.warn('saveWifi:',e);});
+    .then(function(){document.body.innerHTML='<div style="text-align:center;padding-top:80px"><h2 style="color:#3FB950">'+tr('WiFi Saved!')+'</h2><p style="color:#8B949E;margin-top:10px">'+tr('Restarting... Connect to your WiFi and open the device IP address in a browser.')+'</p></div>';})
+    .catch(function(e){document.getElementById('msg').style.color='#F85149';document.getElementById('msg').textContent=tr('Connection error');console.warn('saveWifi:',e);});
 }
 fetch('/wifi/diag').then(function(r){return r.json();}).then(function(d){  if(!d||d.kind==='none')return;
   var q='"'+d.ssid+'"',db=d.rssi?' ('+d.rssi+' dBm)':'',t,m;
+  var HZ={
+    not_found:['找不到该网络','未找到 '+q+'，请检查名称。BambuHelper 需要 2.4 GHz 网络：只支持 5 GHz 的网络，以及未开启「最大兼容性」的手机热点，都无法被它发现。'],
+    name_mismatch:['网络名称不一致','未找到 '+q+'，但附近有「'+d.near+'」。名称区分大小写 - 下方输入框已填入实际扫描到的名称。'],
+    weak:['信号太弱','找到了 '+q+'，但信号太弱'+db+'，无法保持连接。请把设备移近路由器或接入点。'],
+    pass_short:['密码太短','已保存的 '+q+' 密码少于 8 位，WPA2 不接受。请在下方重新输入。'],
+    bad_pass:['密码可能不正确？',q+db+' 拒绝了连接。最可能是密码错误 - 请在下方重新输入。'],
+    enterprise:['不支持的网络',q+' 使用 WPA2-Enterprise（用户名 + 密码登录），BambuHelper 不支持。请改用 WPA2/WPA3 个人版网络。'],
+    no_ip:['没有获取到 IP',q+db+' 已接受连接，但路由器没有分配 IP 地址。请检查路由器的 DHCP 服务或 MAC 过滤。'],
+    other:['无法连接','无法连接到 '+q+db+'。']
+  };
   var H={
     not_found:['Network not found','Could not find '+q+'. Check the name. BambuHelper needs a 2.4 GHz network: 5 GHz-only networks and phone hotspots without "Maximize Compatibility" are invisible to it.'],
     name_mismatch:['Network name mismatch','Could not find '+q+', but "'+d.near+'" is nearby. Names are case-sensitive - the field below now holds the name as seen.'],
@@ -118,15 +169,47 @@ fetch('/wifi/diag').then(function(r){return r.json();}).then(function(d){  if(!d
     enterprise:['Unsupported network',q+' uses WPA2-Enterprise (user name + password login), which BambuHelper does not support. Use a WPA2/WPA3 Personal network.'],
     no_ip:['No IP address',q+db+' accepted the connection, but the router never assigned an IP address. Check its DHCP server or MAC filter.'],
     other:['Could not connect','Could not connect to '+q+db+'.']
-  }[d.kind];
-  if(!H)return;
-  document.getElementById('failT').textContent=H[0];
-  document.getElementById('failM').textContent=H[1];
-  document.getElementById('failD').textContent='Details: '+d.kind+', reason '+d.reason+(d.rssi?', '+d.rssi+' dBm, ch '+d.ch:'');
+  };
+  var P=(window.ALANG==='zh')?HZ[d.kind]:H[d.kind];
+  if(!P)return;
+  document.getElementById('failT').textContent=P[0];
+  document.getElementById('failM').textContent=P[1];
+  document.getElementById('failD').textContent=(window.ALANG==='zh'?'详情：':'Details: ')+d.kind+', reason '+d.reason+(d.rssi?', '+d.rssi+' dBm, ch '+d.ch:'');
   document.getElementById('fail').hidden=false;
   var s=document.getElementById('ssid');
   if(!s.value)s.value=d.kind==='name_mismatch'?d.near:d.ssid;
 }).catch(function(){});
+
+/* Translate the static markup once the DOM is there, and wire the toggle. */
+(function(){
+  var btn=document.getElementById('langBtn');
+  if(btn){
+    btn.textContent=(window.ALANG==='zh')?'EN':'中文';
+    btn.onclick=function(ev){
+      ev.preventDefault();
+      try{ localStorage.setItem('bh-lang',(window.ALANG==='zh')?'en':'zh'); }catch(e){}
+      location.reload();
+    };
+  }
+  if(window.ALANG!=='zh') return;
+  var SKIP={SCRIPT:1,STYLE:1};
+  var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT|NodeFilter.SHOW_ELEMENT,null);
+  var n;
+  while((n=walker.nextNode())){
+    if(n.nodeType===1){
+      ['placeholder','title'].forEach(function(a){
+        var v=n.getAttribute&&n.getAttribute(a);
+        if(v&&window.AP_I18N[v]) n.setAttribute(a,window.AP_I18N[v]);
+      });
+      continue;
+    }
+    var raw=n.nodeValue;
+    if(!raw) continue;
+    if(n.parentNode&&SKIP[n.parentNode.tagName]) continue;
+    var key=raw.trim();
+    if(key&&window.AP_I18N[key]) n.nodeValue=raw.replace(key,window.AP_I18N[key]);
+  }
+})();
 scanWifi();
 </script>
 </body></html>
