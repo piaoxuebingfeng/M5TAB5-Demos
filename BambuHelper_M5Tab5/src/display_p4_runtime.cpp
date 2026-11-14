@@ -38,6 +38,12 @@ bool p4DashboardActive() {
   return cardSkinActive() && isPrinterConfigured(rotState.displayIndex) &&
     (screen == SCREEN_PRINTING || screen == SCREEN_IDLE || screen == SCREEN_FINISHED);
 }
+// Every stage of the touch pipeline that could silently drop a press is counted
+// here and published through /debug. Reading the numbers is far cheaper than
+// re-flashing a guess: an unchanged `presses` means the runtime never saw the
+// finger, a climbing `drops` means the tracker rejected the release.
+static P4TouchDiag touchDiag = {};
+P4TouchDiag p4TouchDiagnostics() { return touchDiag; }
 int p4DashboardPage() { return view.page; }
 uint8_t p4DashboardAmsPage() { return view.amsPage; }
 bool p4DashboardShowingCamera() { return view.showCamera; }
@@ -74,6 +80,25 @@ bool handleP4DashboardTouch() {
   const auto contact = touchContact();
   const bool enabled = buttonType == BTN_TOUCHSCREEN && p4DashboardActive() && !isNightBlackout();
   const auto point = p4ui::touchPoint(contact.x, contact.y, dispSettings.rotation);
+  // Press/release bookkeeping for /debug. Deliberately independent of `enabled`:
+  // if the dashboard refuses input we still want to see that a finger arrived.
+  static bool downPrev = false;
+  static uint32_t pressBeganMs = 0;
+  static p4ui::Point pressStart = {};
+  const bool released = downPrev && !contact.down;
+  if (contact.down && !downPrev) {
+    touchDiag.presses++;
+    pressBeganMs = millis();
+    pressStart = point;
+  }
+  if (released) {
+    touchDiag.lastDurMs = millis() - pressBeganMs;
+    touchDiag.startX = (int16_t)pressStart.x; touchDiag.startY = (int16_t)pressStart.y;
+    touchDiag.endX = (int16_t)point.x; touchDiag.endY = (int16_t)point.y;
+    const int dx = point.x - pressStart.x, dy = point.y - pressStart.y;
+    touchDiag.lastExcursion = (uint16_t)((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy));
+  }
+  downPrev = contact.down;
 #if defined(M5TAB5_TOUCH_TRACE)
   {
     static bool lastTraceDown = false;
@@ -112,7 +137,18 @@ bool handleP4DashboardTouch() {
   const auto gesture = touch.update(contact.down, contact.valid, point, millis(), enabled &&
     (previousSlot == rotState.displayIndex || previousSlot == 255) &&
     (previousRotation == dispSettings.rotation || previousRotation == 255));
-  if (!enabled) return false;
+  if (released) {
+    touchDiag.lastGesture = (uint8_t)gesture;
+    if (gesture == p4ui::Gesture::Tap) touchDiag.taps++;
+    else if (gesture == p4ui::Gesture::None) touchDiag.drops++;
+    else touchDiag.swipes++;
+  }
+  // A release that already passed the strict press-edge gate must still
+  // complete, even if the dashboard stopped owning input while the finger was
+  // down (a slot rotation, a screen-state flip, the night blackout). Bailing out
+  // on `!enabled` here discarded exactly those releases - the press had been
+  // accepted and tinted the icon, the action never ran.
+  if (!enabled && contact.down) return false;
   if (contact.down) {
     // Keep a manually explored printer visible through the gesture/detail read.
     rotState.lastRotateMs = millis();
@@ -120,7 +156,10 @@ bool handleP4DashboardTouch() {
   }
   if (gesture != p4ui::Gesture::None) {
     buzzerPlayClick(); ledOnUserInteraction(); lastInteraction = millis();
+    const int8_t pageBefore = view.page;
     const auto action = p4DashboardGesture(view, displayedPrinter().state, gesture, touch.origin());
+    touchDiag.lastAction = action == P4Action::NextPrinter ? 1
+                          : (view.page != pageBefore ? 2 : 0);
     if (action == P4Action::NextPrinter) {
       // A tap on the name row is an explicit choice: hold it far longer than
       // the 60 s "peek" a plain touch grants, otherwise Smart mode snaps the

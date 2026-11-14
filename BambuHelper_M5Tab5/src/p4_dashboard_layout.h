@@ -95,19 +95,34 @@ enum class Gesture { None, Tap, Left, Right, Up, Down };
 inline Gesture classify(Point start, Point end, uint32_t duration, int excursion) {
   const int dx = end.x - start.x, dy = end.y - start.y;
   const int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
-  if (duration > 1500) return Gesture::None;
+  if (duration > 2500) return Gesture::None;
   if (ax >= 64 && ax > ay * 2) return dx < 0 ? Gesture::Left : Gesture::Right;
   if (ay >= 64 && ay > ax * 2) return dy < 0 ? Gesture::Up : Gesture::Down;
   // A tap is a press that stays roughly put. 24 authored px is only ~2.9 mm of
   // glass once the Tab5's 1.2x scale is applied, and a fingertip wobbles more
   // than that by itself, so short taps on the header icons were being thrown
-  // away as "not a gesture" - the tap simply never reached the hit test. 46 px
-  // is ~5.5 mm and still sits well below the 64 px a deliberate swipe needs on
-  // its dominant axis, so swipes keep classifying as swipes.
-  return excursion <= 46 && duration >= 30 && duration <= 800 ? Gesture::Tap : Gesture::None;
+  // away as "not a gesture" - the tap simply never reached the hit test. 56 px
+  // (~6.7 mm) still sits below the 64 px a deliberate swipe needs on its
+  // dominant axis, so swipes keep classifying as swipes.
+  //
+  // There is deliberately NO upper duration bound any more. The old 800 ms cap
+  // was the last thing breaking header taps: once the icon tints green the user
+  // hesitates for a moment before lifting, and a press held just over a second
+  // was silently downgraded to "not a gesture". Holding still is still a tap -
+  // 2500 ms is the only cutoff, and that is the stale-contact window.
+  return excursion <= 56 && duration >= 30 ? Gesture::Tap : Gesture::None;
 }
 // A wake gesture, bus failure, multitouch or modal transition must never turn
 // its eventual release into a navigation tap on a newly visible screen.
+//
+// Only the PRESS edge is gated. `enabled` covers "the dashboard owns input and
+// the slot/rotation are not mid-transition", and it used to be re-evaluated on
+// every poll - so a slot rotation, a screen-state flip or one bad I2C read
+// during the 100-300 ms the finger was down would clear `tracking` and the
+// release produced no gesture at all. That is why the header icons tinted green
+// (the press edge had been accepted) yet nothing ever opened. Once a press has
+// been accepted, the release must always be judged: interrupt it only if the
+// finger never landed validly in the first place.
 class TouchTracker {
   bool wasDown = false, tracking = false;
   Point start = {}, end = {};
@@ -117,18 +132,29 @@ public:
   Point origin() const { return start; }
   Gesture update(bool down, bool valid, Point p, uint32_t now, bool enabled) {
     Gesture result = Gesture::None;
-    if (!enabled || !valid) tracking = false;
-    if (down && !wasDown && enabled && valid) {
-      start = end = p; began = now; excursion = 0; tracking = true;
-    }
-    if (tracking && down) {
-      end = p;
-      int dx = p.x-start.x, dy = p.y-start.y;
-      int distance = (dx<0?-dx:dx)+(dy<0?-dy:dy);
-      if (distance>excursion) excursion=distance;
-    }
-    if (!down && wasDown && tracking) {
-      result = classify(start,end,now-began,excursion); tracking=false;
+    if (down && !wasDown) {
+      // Press edge: strict. A press that starts during a transition, or whose
+      // first report is a failed coordinate read, is not owned by this view.
+      if (enabled && valid) {
+        start = end = p; began = now; excursion = 0; tracking = true;
+      } else {
+        tracking = false;
+      }
+    } else if (down && tracking) {
+      // Held: follow the finger, but skip frames whose coordinates were
+      // unreadable instead of discarding the whole press.
+      if (valid) {
+        end = p;
+        int dx = p.x-start.x, dy = p.y-start.y;
+        int distance = (dx<0?-dx:dx)+(dy<0?-dy:dy);
+        if (distance>excursion) excursion=distance;
+      }
+    } else if (!down && wasDown && tracking) {
+      // Release: always judge. `valid` is not required here because the GT911
+      // clears it on a failed read and on some release frames, and `enabled`
+      // is not re-checked for the reason above.
+      result = classify(start,end,now-began,excursion);
+      tracking = false;
     }
     wasDown=down;
     return result;

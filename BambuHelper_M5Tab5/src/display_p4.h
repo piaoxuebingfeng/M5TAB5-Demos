@@ -14,6 +14,23 @@ struct P4DashboardView {
   bool amsManual = false;
 };
 enum class P4Action { None, NextPrinter };
+// Touch pipeline counters, surfaced at /debug. Every stage that can silently
+// swallow a press is counted separately: a press the tracker never accepted, a
+// release it judged as "no gesture", and a release it judged as a swipe. If the
+// header icons stop responding again, these numbers say which stage dropped the
+// tap instead of guessing.
+struct P4TouchDiag {
+  uint32_t presses;     // press edges seen by the runtime
+  uint32_t taps;        // releases classified as Tap
+  uint32_t drops;       // releases classified as None (the bug we just fixed)
+  uint32_t swipes;      // releases classified as a direction
+  uint32_t lastDurMs;   // duration of the last completed press
+  uint16_t lastExcursion;
+  int16_t  startX, startY, endX, endY;  // authored canvas coordinates
+  uint8_t  lastGesture; // 0 none, 1 tap, 2 left, 3 right, 4 up, 5 down
+  uint8_t  lastAction;  // 0 none, 1 next-printer, 2 page change
+};
+P4TouchDiag p4TouchDiagnostics();
 P4Action p4DashboardGesture(P4DashboardView& view, const BambuState& state,
                             p4ui::Gesture gesture, p4ui::Point origin);
 // Tint the header icons while a finger is on them (0 = none, 1 = info, 2 = gear).

@@ -1046,6 +1046,23 @@ static void handleDebug() {
   // p4Web scratch copy of rotState - reading the latter would always report 0.
   doc["display_slot"] = ui.slot;
   doc["rotate_mode"] = (uint8_t)p4UiSettings.rotState.mode;
+  // Touch pipeline counters. The header icons tinting green but not opening is
+  // a press that was accepted and a release that was dropped - these five
+  // numbers tell the two apart without a debugger on the glass.
+  const P4TouchDiag ptd = p4TouchDiagnostics();
+  JsonObject touchp = doc["touch_taps"].to<JsonObject>();
+  touchp["presses"] = ptd.presses;
+  touchp["taps"] = ptd.taps;
+  touchp["drops"] = ptd.drops;
+  touchp["swipes"] = ptd.swipes;
+  touchp["last_ms"] = ptd.lastDurMs;
+  touchp["last_exc"] = ptd.lastExcursion;
+  touchp["last_gesture"] = ptd.lastGesture;
+  touchp["last_action"] = ptd.lastAction;
+  touchp["start_x"] = ptd.startX;
+  touchp["start_y"] = ptd.startY;
+  touchp["end_x"] = ptd.endX;
+  touchp["end_y"] = ptd.endY;
   const ThumbDiagnostics thumb = thumbDiagnostics(rotState.displayIndex);
   JsonObject image = doc["thumbnail"].to<JsonObject>();
   image["ready"] = thumb.ready;
