@@ -117,9 +117,11 @@ public:
     if (width <= 0) return 0;
     const bool cjk = needsCjkFont(value);
     const bool fixedFace = face == FONT_CJK || face == FONT_P4_CN_SMALL || face == FONT_P4_DURATION;
-    const bool smallCjk = cjk && !fixedFace && scale < .91f;
-    g.setTextSize(smallCjk ? 1 : scale);
-    const lgfx::IFont* f = cachedFont(cjk && !fixedFace ? (smallCjk ? FONT_P4_CN_SMALL : FONT_CJK) : face);
+    // FONT_CJK is now the full GB2312 face and FONT_P4_CN_SMALL is the same
+    // blob, so small CJK text simply draws at the caller's own scale (0.85 of
+    // 24px = 20.4px, the size the retired 20px subset used to give it).
+    g.setTextSize(scale);
+    const lgfx::IFont* f = cachedFont(cjk && !fixedFace ? FONT_CJK : face);
     g.setFont(f ? f : &lgfx::fonts::Font2);
     g.setTextDatum(centered ? lgfx::textdatum_t::middle_center :
       middle ? lgfx::textdatum_t::middle_left : lgfx::textdatum_t::top_left);
@@ -273,12 +275,30 @@ const char* wifiQuality(int rssi) {
   return rssi >= -50 ? "Wi-Fi 极佳" : rssi >= -65 ? "Wi-Fi 良好" : rssi >= -75 ? "Wi-Fi 一般" : "Wi-Fi 较弱";
 }
 
+// "A1 mini" / "A1mini" / "A1 MINI" are the same machine to a human, and a
+// second copy of it in the header pushed the switch caret into the model text.
+// Compared byte-wise (UTF-8 passes through) with spaces and case folded away.
+bool sameLabel(const char* a, const char* b) {
+  if (!a || !b) return false;
+  while (true) {
+    while (*a == ' ' || *a == '\t') ++a;
+    while (*b == ' ' || *b == '\t') ++b;
+    if (!*a || !*b) break;
+    const unsigned char ca = (unsigned char)*a, cb = (unsigned char)*b;
+    const unsigned char la = (ca >= 'A' && ca <= 'Z') ? ca + 32 : ca;
+    const unsigned char lb = (cb >= 'A' && cb <= 'Z') ? cb + 32 : cb;
+    if (la != lb) return false;
+    ++a; ++b;
+  }
+  return !*a && !*b;
+}
+
 void header(Canvas& cv, const PrinterSlot& p, const P4DashboardView& v, time_t now, const char* deviceIp) {
   char name[100];
   // A name the user typed as the model name ("P1S") would otherwise render as
   // "P1S · P1S"; keep the model only when it adds information.
   const char* model = modelFor(p.config).name;
-  if (p.config.name[0] && model && strcasecmp(p.config.name, model) == 0)
+  if (p.config.name[0] && sameLabel(p.config.name, model))
     snprintf(name, sizeof(name), "%s", p.config.name);
   else
     snprintf(name, sizeof(name), "%s · %s", p.config.name[0] ? p.config.name : "打印机", model);
@@ -291,10 +311,7 @@ void header(Canvas& cv, const PrinterSlot& p, const P4DashboardView& v, time_t n
   uint8_t readySlots = 0;
   for (uint8_t i = 0; i < MAX_ACTIVE_PRINTERS; ++i) if (slotReady(i)) ++readySlots;
   if (readySlots > 1) {
-    // +20 rather than +10: Canvas::text() reports textWidth() for the fitted
-    // string, and the CJK fallback face advances slightly wider than it
-    // measures, so a 10px gap drew the caret on top of the last glyph.
-    const int cx = end + 20, cy = headerAxis;
+    const int cx = end + 14, cy = headerAxis;
     cv.g.drawLine(cx, cy - 4, cx + 5, cy + 2, FG);
     cv.g.drawLine(cx + 5, cy + 2, cx + 10, cy - 4, FG);
     end = cx + 16;

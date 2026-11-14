@@ -12,9 +12,12 @@
 #else
 // PlatformIO used board_build.embed_files + objcopy, exposing the VLW blobs as
 // _binary_* link symbols. Arduino IDE has no such mechanism, so
-// tools/prepare_assets.py pre-builds the same bytes as PROGMEM arrays in
-// p4_sans_fonts.cpp (declared constexpr-sized in p4_sans_fonts.h). The glyph
-// subset is derived from the source character set, cutting 6.7 MB to ~230 KB.
+// tools/build_cjk_font.py pre-builds the same bytes as a PROGMEM array in
+// p4_sans_fonts.cpp (declared constexpr-sized in p4_sans_fonts.h). The blob is
+// the complete GB2312 face (Noto Sans SC 24px, ~4 MB): job titles and printer
+// names are typed by the user, so a source-charset subset renders them as
+// tofu boxes. That is why this sketch ships its own 15 MB app partition
+// (partitions.csv) instead of the board package's 6.5 MB default.
 #include "p4_sans_fonts.h"
 #endif
 #include "fonts/inter_p4_progress.h"
@@ -175,7 +178,10 @@ static const uint8_t* fontData(FontID id) {
     switch (id) {
 #if defined(BOARD_IS_WS_P4_7B)
         case FONT_CJK: return p4SansData;
-        case FONT_P4_CN_SMALL: return p4SansSmallData;
+        // The 20px subset is gone: one full GB2312 face serves both roles, and
+        // everything that asks for the small variant renders it at ~0.85x
+        // (24 * 0.85 = 20.4 px), which is the size it had before.
+        case FONT_P4_CN_SMALL: return p4SansData;
         case FONT_P4_PROGRESS: return inter_p4_progress;
         case FONT_P4_VALUE: return inter_p4_value;
         case FONT_P4_DURATION: return p4_duration;

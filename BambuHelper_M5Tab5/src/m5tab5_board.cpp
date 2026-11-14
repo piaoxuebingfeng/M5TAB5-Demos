@@ -27,7 +27,7 @@
 
 // Stage 2: committed, pre-generated assets. These replace the PlatformIO-only
 // embed_files / extra_scripts mechanisms.
-//   p4_sans_fonts.h    <- assets/p4/*.vlw, subset to the source charset
+//   p4_sans_fonts.h    <- assets/p4/*.vlw, full GB2312 face (tools/build_cjk_font.py)
 //   p4_printer_artwork.h <- include/p4_printer_artwork.h (verbatim)
 // web_assets_gz.h is deliberately NOT included here: it uses static storage,
 // and web_server.cpp is now its single owner. Including it twice would put a
@@ -54,8 +54,9 @@ static_assert(BOARD_IS_WS_P4_7B == 1, "P4 runtime architecture gate must stay on
 static_assert(BOARD_IS_M5TAB5 == 1, "Tab5 board switch must be on");
 
 // --- Asset integrity ------------------------------------------------------
-static_assert(p4SansData_size > 100000, "24px CJK font subset is missing");
-static_assert(p4SansSmallData_size > 80000, "20px CJK font subset is missing");
+// Full GB2312 face: 4.0 MB, so anything below 3.5 MB means the generator ran
+// with the old source-charset subset (tofu boxes in print job titles).
+static_assert(p4SansData_size > 3500000, "full GB2312 CJK face is missing");
 static_assert(sizeof(p4_art_a1) > 1000, "printer artwork is missing");
 static_assert(sizeof(inter_10) > 100, "bitmap font table is missing");
 
@@ -70,10 +71,9 @@ const char* m5tab5BoardName() {
 
 // Referencing the generated blobs keeps them in the linked image: a bare
 // static_assert would let --gc-sections drop them, so this proves the asset
-// layer really fits the 6.5 MB app slot of the board package. Later stages
+// layer really fits the app slot declared in partitions.csv. Later stages
 // replace this with the real consumers (fonts.cpp already reads p4SansData).
 uint32_t m5tab5AssetFingerprint() {
   return (uint32_t)p4SansData[0]
-       ^ (uint32_t)p4SansSmallData[0]
        ^ (uint32_t)p4_art_a1[0];
 }

@@ -1,0 +1,20 @@
+# BambuHelper / M5Stack Tab5 - single 15 MB application slot.
+#
+# The board package's default_16MB layout (2 x 6.5 MB OTA slots + 3.6 MB
+# SPIFFS) was sized for a firmware without a real Chinese font: the dashboard
+# ships the complete GB2312 face (~4.0 MB) so print job titles and printer
+# names cannot render as tofu boxes, which lands the image at ~8.4 MB.
+#
+# This sketch never uses SPIFFS (web assets are compiled in as PROGMEM) and has
+# no OTA update path, so both 6.5 MB slots are handed to the running app.
+#
+#   Arduino IDE : Tools > Partition Scheme > Custom   (reads this file)
+#   CLI         : --board-options PartitionScheme=custom   (build.sh does it)
+#
+# nvs is kept at 0x9000 / 0x5000 so Wi-Fi credentials and the printer slots
+# survive a reflash with this table.
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  factory,  0x10000,  0xF00000,
+coredump, data, coredump, 0xF10000, 0x10000,
