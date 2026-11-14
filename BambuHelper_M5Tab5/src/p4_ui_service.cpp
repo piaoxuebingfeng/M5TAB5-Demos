@@ -13,8 +13,20 @@
 #include <new>
 #include <esp_heap_caps.h>
 namespace {
+// Screenshot frame capacity. The 7B panel is 1024x600; the Tab5 panel is
+// 1280x720, and its screenCaptureBegin() hands back the full logical size, so a
+// buffer sized for the 7B made every Tab5 capture fail the dimension check
+// below and return 503 forever. Both frames live in PSRAM (createExternal), so
+// the larger size costs 5.5 MB of the 32 MB part, not internal SRAM.
+#if defined(BOARD_IS_M5TAB5)
+#define P4_FRAME_MAX_W 1280
+#define P4_FRAME_MAX_H 720
+#else
+#define P4_FRAME_MAX_W 1024
+#define P4_FRAME_MAX_H 600
+#endif
 struct Frame {
-  uint16_t pixels[1024 * 600];
+  uint16_t pixels[P4_FRAME_MAX_W * P4_FRAME_MAX_H];
   int width = 0, height = 0;
 };
 using FrameMailbox = SpscLatest<Frame, 2>;
@@ -104,9 +116,18 @@ void p4UiPublishStatus() {
   // screenCaptureBegin can repaint a legacy view while assembling its shot.
   // Always release its sprite and restore the real panel, including a frame
   // whose size cannot be published or whose mailbox is temporarily occupied.
-  if (!pixels || w <= 0 || h <= 0 || w > 1024 || h > 600 ||
+  if (!pixels || w <= 0 || h <= 0 || w > P4_FRAME_MAX_W || h > P4_FRAME_MAX_H ||
       size_t(w) * h > sizeof(Frame::pixels) / sizeof(uint16_t)) {
-    Serial.printf("P4 screenshot: invalid dimensions %d x %d\n", int(w), int(h));
+    // Retire the request even though it produced nothing. Leaving capturedSerial
+    // behind made p4UiFrameReady() stay false for the HTTP task, while this
+    // capture path re-ran on every UI tick and reprinted this line - one
+    // /screen.bmp against an oversized panel turned the console into a 2 ms
+    // firehose (35 KB in a few seconds) and starved the render loop. The HTTP
+    // side already reports 503 when no fresh frame arrives, so failing once is
+    // both correct and quiet.
+    Serial.printf("P4 screenshot: cannot capture %d x %d (buffer %dx%d)\n",
+                  int(w), int(h), P4_FRAME_MAX_W, P4_FRAME_MAX_H);
+    capturedSerial.store(request, std::memory_order_release);
     return;
   }
   if (Frame* frame = mailbox->beginWrite()) {
