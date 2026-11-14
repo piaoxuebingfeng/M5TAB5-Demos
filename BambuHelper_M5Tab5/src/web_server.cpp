@@ -641,8 +641,14 @@ static void handleSaveWifi() {
 #if defined(BOARD_IS_WS_P4_7B)
   // This is the commit which arms the deferred restart. The cloud/storage
   // owner saves this exact generation first, then schedules the reboot.
+  // Note: this TU binds P4_SETTINGS_OWNER to p4Web (line 66), so the writes
+  // above already landed in the commit source - no extra copy is needed.
   restartAfterSaveMs.store(1000, std::memory_order_release);
+  Serial.printf("[save-wifi] ssid=\"%s\" pass_len=%u -> committing\n",
+                wifiSSID, (unsigned)strlen(wifiPass));
   const bool queued = p4CommitWebSettings();
+  Serial.printf("[save-wifi] commit queued=%d restart_at=%lu\n", (int)queued,
+                (unsigned long)pendingRestartAt);
 #else
   saveSettings();
   const bool queued = true;
@@ -3266,10 +3272,52 @@ static void handleOtaRollback() {
 }
 
 // Lists nearby networks for the setup page so nobody has to type an SSID by
-// hand (and get the case wrong). Sorted strongest-first; the radio does a
-// blocking scan, which is fine on a page that only exists during setup.
+// hand (and get the case wrong). Sorted strongest-first.
+//
+// This handler runs on the single HTTP task, which also serves every other
+// page and owns the deferred restart, so the wait has to be bounded. A
+// synchronous scanNetworks() blocks for WiFiScanClass::_scanTimeout - 60 s by
+// default - whenever the radio never posts SCAN_DONE. On the Tab5 the STA
+// side is an ESP32-C6 behind ESP-Hosted, and that wait is what made "Rescan"
+// look dead and left the immediately following "Save WiFi & Restart"
+// unanswered: the request was queued behind a minute-long scan.
+//
+// An async start plus a short scanComplete() poll also self-heals. If a
+// generation leaves WIFI_SCANNING_BIT set, the synchronous path returns -1 at
+// the top and never clears it, so every later scan stays empty; scanComplete()
+// clears the bit once the deadline passes, which restores the next attempt.
 static void handleWifiScan() {
-  const int found = WiFi.scanNetworks(false, true);
+  constexpr uint32_t kScanBudgetMs = 6000;
+  WiFi.setScanTimeout(kScanBudgetMs);
+
+  int16_t started = WiFi.scanNetworks(true, true);
+  if (started == WIFI_SCAN_RUNNING && WiFi.scanComplete() == WIFI_SCAN_FAILED) {
+    // -1 without a scan actually running: stale running bit. Drop and retry.
+    WiFi.scanDelete();
+    started = WiFi.scanNetworks(true, true);
+  }
+
+  int16_t found = started;
+  if (started == WIFI_SCAN_RUNNING) {
+    const uint32_t deadline = millis() + kScanBudgetMs + 1000;
+    while (int32_t(millis() - deadline) < 0) {
+      found = WiFi.scanComplete();
+      if (found != WIFI_SCAN_RUNNING) break;
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+  }
+  Serial.printf("[wifi-scan] result=%d bits=%lx\n", (int)found,
+                (unsigned long)WiFi.getStatusBits());
+
+  if (found < 0) {
+    WiFi.scanDelete();   // also clears a stuck running bit for the next try
+    String out = "{\"error\":\"scan_failed\",\"code\":";
+    out += int(found);
+    out += "}";
+    server.send(200, "application/json", out);
+    return;
+  }
+
   JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
   for (int i = 0; i < found; ++i) {

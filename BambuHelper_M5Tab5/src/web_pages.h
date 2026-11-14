@@ -83,6 +83,10 @@ function scanWifi(){
   var sel=document.getElementById('ssidList');
   sel.innerHTML='<option value="">Scanning...</option>';
   fetch('/wifi/scan').then(function(r){return r.json();}).then(function(list){
+    if(list && !Array.isArray(list)){
+      sel.innerHTML='<option value="">Scan unavailable - type the name below</option>';
+      return;
+    }
     sel.innerHTML='<option value="">Choose a network...</option>';
     (list||[]).forEach(function(n){
       if(!n||!n.ssid)return;
@@ -91,7 +95,8 @@ function scanWifi(){
       o.textContent=n.ssid+'  ('+n.rssi+' dBm'+(n.enc?'':', open')+')';
       sel.appendChild(o);
     });
-  }).catch(function(){ sel.innerHTML='<option value="">Scan failed - rescan</option>'; });
+    if(!list||!list.length) sel.innerHTML='<option value="">No networks found - type the name below</option>';
+  }).catch(function(){ sel.innerHTML='<option value="">Scan failed - type the name below</option>'; });
 }
 function saveWifi(){
   var s=document.getElementById('ssid').value,p=document.getElementById('pass').value;
