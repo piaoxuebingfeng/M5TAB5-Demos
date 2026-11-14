@@ -1,0 +1,120 @@
+M5Stack Tab5 — first hardware bring-up record
+=============================================
+
+Date        : 2026-11-14
+Port        : /dev/ttyACM0 (USB-Serial/JTAG)
+Chip        : ESP32-P4 rev v1.0, dual core 400 MHz, MAC 30:ed:a0:00:00:00
+Flash/PSRAM : 16384 KB / 32768 KB
+Firmware    : 4542864 B @0x10000 (69% of the 6.5 MB app slot), hash verified
+Toolchain   : arduino-cli 1.2.0 (the copy embedded in Arduino IDE 2.3.6)
+              + ~/.arduinoIDE/arduino-cli.yaml, fqbn m5stack:esp32:m5stack_tab5
+Upload      : 18.3 s @ ~2.0 Mbit/s
+
+Result: boots, panel lights up landscape at 1280x720, GT911 answers at 0x14,
+Wi-Fi AP + web server come up, no panic and no reboot.
+
+--- boot log (verbatim, first run before the rotation fix) ----------------
+
+ocations=0 failures=0 heap_failures=0 last_bytes=0 last_caps=0x0ESP-ROM:esp32p4-eco2-20240710
+Build:Jul 10 2024
+rst:0x17 (CHIP_USB_UART_RESET),boot:0x20c (SPI_FAST_FLASH_BOOT)
+Core0 Saved PC:0x4ff03f48
+Core1 Saved PC:0x4ff03f48
+SPI mode:DIO, clock div:1
+load:0x4ff33ce0,len:0x1174
+load:0x4ff29ed0,len:0xccc
+load:0x4ff2cbd0,len:0x3540
+entry 0x4ff29ed0
+
+==============================================
+*** BambuHelper / M5Stack Tab5 ***
+==============================================
+build   : BambuHelper/M5Tab5 stage 4
+assets  : 0x00000089
+flash   : 16384 KB   psram: 32768 KB   panel: 1280x720
+[tab5-io] PI4IOE 0x43/0x44 ready, LCD_RST + TP_RST released
+
+=== BambuHelper v4.0.4 Starting ===
+Display: calling _tft_instance.init()...
+Display: tft.init() done
+Display: setRotation done
+Display: fillScreen done
+[tls-memory] large buffers use PSRAM alignment=64
+[net-stage] netif_begin
+[hosted-memory] RX PSRAM allocator installed alignment=64
+[net-stage] netif_ready
+MQTT: [0] not configured, skipping
+[camera-storage] credentials=0 enabled=0 automatic=0
+MQTT: [1] not configured, skipping
+GT911: I2C scan -> 0x10 0x14 0x32 0x36 0x40 0x41 0x43 0x44 0x68
+GT911: reset latched the INT-high address
+GT911 touch initialized (addr 0x14, SDA=31 SCL=32 INT=23, id 911?)
+AP started: BambuHelper-XXXX (IP: 192.168.4.1)
+Web server started on port 80
+[mqtt-health] uptime=10 online=0 heap=357308 stack_min=31064
+[web-health] uptime=10 calls=1493 stack_min=11532
+[wifi-health] uptime=10 status=1 heap=357308 dropped=0 rpc_timeouts=0
+[net-health] ip=0.0.0.0 bits=1 internal=357308 largest=311284 psram=31209156
+[cloud-health] uptime=10 stack_min=14304
+[hosted-mfailures=0 dma_free=317752 dma_largest=311284
+[tls-memory] psram_allocations=0 failures=0 heap_failures=0 last_bytes=0 last_caps=0x0
+[mqtt-health] uptime=20 online=0 heap=357308 stack_min=30984
+[wifi-health] uptime=20 status=1 heap=357308 dropped=0 rpc_timeouts=0
+[net-health] ip=0.0.0.0 bits=1 internal=357308 largest=311284 psram=31209156
+[hosted-memory] rx_psram=0 largest_request=0 failures=0 dma_fream_allocations=0 failures=0 heap_failures=0 last_bytes=0 last_caps=0x0
+[cloud-health] uptime=20 stack_min=14304
+[web-health] uptime=20 calls=4827 stack_min=10644
+
+--- boot log (verbatim, after the phase-7 rotation/touch fix) ------------
+
+0x36 0x40 0x41 0x43 0x44 0x68
+GT9ESP-ROM:esp32p4-eco2-20240710
+Build:Jul 10 2024
+rst:0x17 (CHIP_USB_UART_RESET),boot:0x20c (SPI_FAST_FLASH_BOOT)
+Core0 Saved PC:0x4ff03f48
+Core1 Saved PC:0x40072210
+SPI mode:DIO, clock div:1
+load:0x4ff33ce0,len:0x1174
+load:0x4ff29ed0,len:0xccc
+load:0x4ff2cbd0,len:0x3540
+entry 0x4ff29ed0
+
+==============================================
+*** BambuHelper / M5Stack Tab5 ***
+==============================================
+build   : BambuHelper/M5Tab5 stage 6 (app layer live)
+assets  : 0x00000089
+flash   : 16384 KB   psram: 32768 KB   panel: 1280x720
+[tab5-io] PI4IOE 0x43/0x44 ready, LCD_RST + TP_RST released
+
+=== BambuHelper v4.0.4 Starting ===
+Display: calling _tft_instance.init()...
+Display: tft.init() done
+Display: setRotation done (logical 1280x720, canvas 1024x600, user rot 0)
+Display: fillScreen done
+[tls-memory] large buffers use PSRAM alignment=64
+[net-stage] netif_begin
+[hosted-memory] RX PSRAM allocator installed alignment=64
+[net-stage] netif_ready
+MQTT: [0] not configured, skipping
+matic=0
+MQTT: [1] not configured, skipping
+GT911: I2C scan -> 0x10 0x14 0x32 0x36 0x40 0x41 0x43 0x44 0x68
+GT911: reset latched the INT-high address
+GT911 touch initialized (addr 0x14, SDA=31 SCL=32 INT=23, id 911?)
+AP started: BambuHelper-XXXX (IP: 192.168.4.1)
+Web server started on port 80
+[mqtt-health] uptime=10 online=0 heap=357272 stack_min=31064
+[web-health] uptime=10 calls=1492 stack_min=11532
+[cloud-health] uptime=10 stack_min=14384
+[wifi-health] uptime=10 status=1 heap=357272 dropped=0 rpc_timeouts=0
+[net-health] ip=0.0.0.0 bits=1 internal=357272 largest=311284 psram=31209156
+[hosted-memory] rx_psram=0 largest_request=0 failures=0 dma_free=317716 dma_largest=311284
+[tls-memory] psram_allocations=0 failures=0 heap_failures=0 last_bytes=0 last_caps=0x0
+[mqtt-health] uptime=20 online=0 heap=357272 stack_min=30984
+[web-health] uptime=20 calls=4826 stack_min=10644
+[cloud-health] uptime=20 stack_min=14384
+[wifi-health] uptime=20 status=1 heap=357272 dropped=0 rpc_timeouts=0
+[net-health] ip=0.0.0.0 bits=1 internal=357272 largest=311284 psram=31209156
+[hosted-memory] rx_psra=317716 dma_largest=311284
+[tls-memory] psram_allocations=0 failures=0 heap_failures=0 last_bytes=0 last_caps=0x0
