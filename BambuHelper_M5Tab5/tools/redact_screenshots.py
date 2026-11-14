@@ -36,7 +36,7 @@ TAG = "bambohelper-redacted"
 TARGETS = {
     "bringup-idle-2026-11-14.png": ((160, 235, 400, 275), ADDRESS),
     "bringup-cloud-p1s-2026-11-14.png": ((50, 6, 150, 22), ADDRESS),
-    "bringup-cloud-p1s-fullscreen-1280x720.png": ((80, 12, 240, 34), ADDRESS),
+    "dashboard-a1mini-1280x720.png": ((196, 30, 380, 68), ADDRESS),
     "bringup-progress-pct-fixed-2026-11-14.png": ((75, 12, 200, 34), ADDRESS),
     "cjk-job-title-2026-11-14.png": ((180, 25, 380, 70), ADDRESS),
     "multi-printer-switch-2026-11-14.png": ((160, 25, 360, 70), ADDRESS),
