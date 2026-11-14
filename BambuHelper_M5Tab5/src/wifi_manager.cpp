@@ -64,6 +64,15 @@ static void capTxPower() {
 }
 #endif
 
+// Board-level ceiling on RF peak current (see BOARD_WIFI_TX_POWER in
+// board_config.h). Applied on every connect, not just when the C3 workaround
+// kicks in: on the Tab5 this is about the supply, not the antenna.
+static void applyBoardTxCap() {
+#if defined(BOARD_WIFI_TX_POWER)
+  WiFi.setTxPower(BOARD_WIFI_TX_POWER);
+#endif
+}
+
 // --- Failure hint for AP fallback ---
 // Release builds log at level E, so the core's own "Reason: N" warning is
 // invisible; capture the reasons here. State covers everything since the last
@@ -293,6 +302,7 @@ void startAP() {
   // Use AP+STA so we can probe STA while serving the config portal
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(ssidBuf, WIFI_AP_PASSWORD);
+  applyBoardTxCap();
 #if BOARD_NEEDS_WIFI_TX_LIMIT
   capTxPower();
   Serial.println("WiFi: TX power capped to 8.5 dBm in AP mode (C3 antenna workaround)");
@@ -410,6 +420,7 @@ static void beginStaConnectAttempt() {
   WiFi.mode(WIFI_STA);
   applyStaticNetworkConfig();
   WiFi.begin(wifiSSID, wifiPass);
+  applyBoardTxCap();
 #if BOARD_NEEDS_WIFI_TX_LIMIT
   if (wifiTxCapped) capTxPower();
 #endif
@@ -696,6 +707,9 @@ void handleWiFi() {
         // for normal operation, capped boards stay at 8.5 dBm.
         if (!wifiTxCapped) WiFi.setTxPower(WIFI_POWER_19_5dBm);
 #endif
+        // ... unless the board has a supply-driven ceiling, which nothing in
+        // the association path may raise.
+        applyBoardTxCap();
         apMode = false;
         staProbing = false;
         disconnectTime = 0;

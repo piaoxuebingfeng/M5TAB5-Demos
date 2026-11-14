@@ -98,7 +98,18 @@
 #define M5TAB5_HOSTED_D3  8
 #define M5TAB5_HOSTED_RST 15
 
+// --- Radio power ceiling --------------------------------------------------
+// The C6 transmitter is the biggest current step on this board. At the 19.5 dBm
+// default a burst, on top of a 5" panel that already draws about 1 A, is enough
+// to trip the brownout detector when the only supply is a 500 mA PC USB port:
+// the console shows "E BOD: Brownout detector was triggered" + rst:0x3 right
+// after "WiFi: reconnect attempt 1", in a loop. 11 dBm roughly halves the RF
+// peak and still covers a normal flat. Raise or delete this line once the board
+// runs from a 5 V/2 A supply (or with the NP-F550 pack fitted).
+#define BOARD_WIFI_TX_POWER WIFI_POWER_11dBm
+
 // Battery: NP-F550 7.4 V pack behind IP2326, monitored by an INA226 at 0x41.
+
 // BambuHelper only has AXP2101 and ADC backends, so BOARD_HAS_BATTERY stays
 // undefined until an INA226 backend exists - enabling it now would compile an
 // empty battery.cpp and break the link.
