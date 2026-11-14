@@ -8,11 +8,9 @@
  * Build in Arduino IDE : Tools > Board > M5Stack > M5Tab5, then Verify.
  * Build from CLI       : ./build.sh
  *
- * Stages 0-4 landed the scaffold, the board macro matrix, the pre-generated
- * assets and the full business source tree. Stage 5 (this file) brings the
- * hardware up for the first time: expander rails, panel, backlight and touch.
- * The dashboard logic itself still lives in reference/main.cpp and moves in a
- * later stage.
+ * This file only holds the two Arduino entry points. The dashboard itself is
+ * src/app_main.cpp (ported from BambuHelper's main.cpp), and everything it
+ * needs - UI, MQTT, cloud, web server, settings - lives under src/.
  */
 #include <Arduino.h>
 // Core built-in libraries are only added to the include search path when a
@@ -21,11 +19,10 @@
 // __has_include(<Preferences.h>) resolve correctly in every .cpp.
 #include <Preferences.h>
 #include <esp32-hal-hosted.h>   // hostedSetPins(): C6 SDIO map
+
 #include "src/board_config.h"
 #include "src/m5tab5_board_io.h"
-#include "src/settings.h"
-#include "src/display_ui.h"
-#include "src/button_touch_backend.h"
+#include "src/app_main.h"
 
 // Lives in src/m5tab5_board.cpp; proves sketch src/ sources are compiled+linked.
 extern const char* m5tab5BoardName();
@@ -36,7 +33,7 @@ void setup() {
   delay(300);
   Serial.println();
   Serial.println("==============================================");
-  Serial.println("*** BambuHelper / M5Stack Tab5 (stage 5) ***");
+  Serial.println("*** BambuHelper / M5Stack Tab5 ***");
   Serial.println("==============================================");
   Serial.printf("build   : %s\n", m5tab5BoardName());
   Serial.printf("assets  : 0x%08x\n", m5tab5AssetFingerprint());
@@ -45,15 +42,15 @@ void setup() {
                 ESP.getPsramSize() / 1024,
                 M5TAB5_SCREEN_W, M5TAB5_SCREEN_H);
 
-  // 1. Expander rails and resets. Must precede the radio and the panel: the C6
-  //    has no supply until WLAN_PWR_EN is set, and the DSI PHY stays mute while
-  //    LCD_RST is asserted. initDisplay() calls this again; it is a no-op once
-  //    the sequence succeeded.
+  // 1. Expander rails and resets, before anything else touches the panel or
+  //    the radio: the C6 has no supply until WLAN_PWR_EN is set, and the DSI
+  //    PHY stays mute while LCD_RST is asserted.
   if (!m5tab5IoBegin()) {
     Serial.println("FATAL: PI4IOE5V6408 not responding - check the system I2C bus");
   }
 
-  // 2. Tell ESP-Hosted which pins carry the C6 SDIO link, before any WiFi call.
+  // 2. Tell ESP-Hosted which pins carry the C6 SDIO link. Must precede the
+  //    first WiFi call, which appSetup() makes while the splash is up.
   if (!hostedSetPins(M5TAB5_HOSTED_CLK, M5TAB5_HOSTED_CMD,
                      M5TAB5_HOSTED_D0, M5TAB5_HOSTED_D1,
                      M5TAB5_HOSTED_D2, M5TAB5_HOSTED_D3,
@@ -61,23 +58,9 @@ void setup() {
     Serial.println("WARN: hostedSetPins() rejected the Tab5 SDIO map");
   }
 
-  // 3. Settings, then the panel (the splash is drawn inside initDisplay()).
-  loadSettings();
-  recordBootSlotVersion();
-  initDisplay();
-
-  // 4. GT911. Its address was latched during the expander reset pulse, so this
-  //    only has to probe and configure.
-  touchInit();
-  Serial.printf("touch   : ready=%d\n", (int)touchDiagnostics().ready);
+  // 3. Everything above already matched what the 7B board did in its own
+  //    board layer, so the ported application layer starts unchanged.
+  appSetup();
 }
 
-void loop() {
-  static uint32_t lastPrint = 0;
-  TouchContact c = touchContact();
-  if (c.down && c.valid && millis() - lastPrint > 120) {
-    lastPrint = millis();
-    Serial.printf("tap     : x=%u y=%u\n", c.x, c.y);
-  }
-  delay(20);
-}
+void loop() { appLoop(); }
