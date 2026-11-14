@@ -70,6 +70,19 @@ bool handleP4DashboardTouch() {
   const auto contact = touchContact();
   const bool enabled = buttonType == BTN_TOUCHSCREEN && p4DashboardActive() && !isNightBlackout();
   const auto point = p4ui::touchPoint(contact.x, contact.y, dispSettings.rotation);
+#if defined(M5TAB5_TOUCH_TRACE)
+  {
+    static bool lastTraceDown = false;
+    if (contact.down && !lastTraceDown) {
+      // Raw pair is the panel frame; `point` is what the widgets are hit-tested
+      // against. Tap the top-left corner: this must print canvas=(0..4,0..4).
+      Serial.printf("[touch] canvas=(%d,%d) raw=(%u,%u) valid=%d rot=%u\n",
+                    point.x, point.y, contact.x, contact.y, (int)contact.valid,
+                    (unsigned)dispSettings.rotation);
+    }
+    lastTraceDown = contact.down;
+  }
+#endif
   const auto gesture = touch.update(contact.down, contact.valid, point, millis(), enabled &&
     (previousSlot == rotState.displayIndex || previousSlot == 255) &&
     (previousRotation == dispSettings.rotation || previousRotation == 255));

@@ -18,6 +18,13 @@
 // ILI9881C display driver + GT911 touch @ 0x14.
 #define M5TAB5_SCREEN_W 1280
 #define M5TAB5_SCREEN_H 720
+
+// The panel itself is native portrait and the GT911 reports in that frame:
+// M5GFX configures it with x_min=0/x_max=719/y_min=0/y_max=1279. Anything that
+// touches raw touch coordinates must use these, not M5TAB5_SCREEN_W/H.
+#define M5TAB5_PANEL_RAW_W 720
+#define M5TAB5_PANEL_RAW_H 1280
+
 #define M5TAB5_TOUCH_SDA 31
 #define M5TAB5_TOUCH_SCL 32
 #define M5TAB5_TOUCH_INT 23
@@ -54,6 +61,11 @@
 #define GT911_SDA M5TAB5_TOUCH_SDA
 #define GT911_SCL M5TAB5_TOUCH_SCL
 #define GT911_INT M5TAB5_TOUCH_INT
+
+// Bring-up trace: logs the raw controller coordinates and the mapped canvas
+// point on every press edge. Cheap (one line per tap), but it is diagnostic
+// noise once the panel is trusted - comment it out then.
+#define M5TAB5_TOUCH_TRACE 1
 
 // --- I2C bus / board control ---------------------------------------------
 // One system bus carries the two PI4IOE5V6408 expanders, the GT911, the

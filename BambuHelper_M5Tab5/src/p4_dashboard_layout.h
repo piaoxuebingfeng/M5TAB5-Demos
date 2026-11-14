@@ -30,9 +30,27 @@ inline bool homeAmsContains(Point p) {
 // Verified on the 7B: GT911 coordinates already match the mounted display at
 // user rotation 0 (e.g. a gear tap reports x=989, y=42). Only the optional
 // user-requested 180-degree rotation needs a coordinate flip.
+//
+// The Tab5 is different in a way that matters: its GT911 reports in the panel's
+// NATIVE PORTRAIT frame (720x1280), because that is how M5GFX configures the
+// controller (x_max=719, y_max=1279). The dashboard is nevertheless drawn in
+// landscape - display_ui.cpp's sanitizeRotation() maps logical 0/180 onto
+// hardware rotation 3/1, and LovyanGFX only swaps the axes for odd rotations.
+// So the raw pair has to be swapped and mirrored exactly the way
+// Panel_Device::convertRawXY() does it, otherwise every tap lands in the wrong
+// place. Result is in panel (1280x720) coordinates; the 1024x600 canvas is
+// anchored at the top-left, so points outside it simply miss every widget.
+#if defined(BOARD_IS_M5TAB5)
+constexpr int RAW_W = 720, RAW_H = 1280;
+inline Point touchPoint(int x, int y, uint8_t rotation) {
+  return (rotation & 2) ? Point{y, RAW_W - 1 - x}     // hardware rotation 1
+                        : Point{RAW_H - 1 - y, x};    // hardware rotation 3
+}
+#else
 inline Point touchPoint(int x, int y, uint8_t rotation) {
   return (rotation & 2) ? Point{W - 1 - x, H - 1 - y} : Point{x, y};
 }
+#endif
 uint16_t p4ProgressPixel(int x, int width, uint32_t phase, uint16_t accent);
 enum class Gesture { None, Tap, Left, Right, Up, Down };
 inline Gesture classify(Point start, Point end, uint32_t duration, int excursion) {

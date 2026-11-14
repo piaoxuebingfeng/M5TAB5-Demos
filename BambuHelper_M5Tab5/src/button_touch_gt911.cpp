@@ -158,7 +158,15 @@ TouchPoll touchPoll() {
     if (gt911Read(0x8150, xy, sizeof(xy))) {
       contactX = xy[0] | (xy[1] << 8);
       contactY = xy[2] | (xy[3] << 8);
+#if defined(BOARD_IS_M5TAB5)
+      // Bounds check against the controller's NATIVE frame (720x1280), not the
+      // 1024x600 canvas: on the Tab5 the raw pair is still portrait here and the
+      // landscape mapping happens later in p4ui::touchPoint(). Using the canvas
+      // size would discard every tap below y=600.
+      contactValid = contactX < M5TAB5_PANEL_RAW_W && contactY < M5TAB5_PANEL_RAW_H;
+#else
       contactValid = contactX < 1024 && contactY < 600;
+#endif
     } else { contactValid = false; readErrors++; }
   } else if (points != 0) contactValid = false;
 #endif
@@ -172,7 +180,15 @@ TouchPoll touchPoll() {
   }
   const bool down = (points > 0 && points <= GT911_MAX_POINTS);
   frameCount++;
-  if (down && !lastDown) pressCount++;
+  if (down && !lastDown) {
+    pressCount++;
+#if defined(M5TAB5_TOUCH_TRACE)
+    // Bring-up aid: the raw pair is in the panel's native frame, so this line
+    // is what tells you whether the 720x1280 -> 1280x720 mapping is sane.
+    Serial.printf("[touch] press raw=(%u,%u) points=%u valid=%d\n",
+                  contactX, contactY, points, (int)contactValid);
+#endif
+  }
   lastDown    = down;
   lastFrameMs = millis();
   return {TouchEvent::None, lastDown};

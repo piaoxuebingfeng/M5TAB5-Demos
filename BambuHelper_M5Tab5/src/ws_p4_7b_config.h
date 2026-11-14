@@ -14,8 +14,16 @@ static constexpr unsigned char normalizeDisplayRotation(unsigned char rotation) 
 // touch (7/8), LCD (32/33), USB, UART, boot straps and SD/flash/PSRAM banks.
 // The helper is shared by LED, button and buzzer validation, including NVS.
 static constexpr bool isP4SevenBReservedPin(int pin) {
+#if defined(BOARD_IS_M5TAB5)
+  // The table below is the 7B's pin map and means nothing on a Tab5, whose
+  // speaker enable, resets and RF gates live on the PI4IOE expanders or on
+  // dedicated pins. Applying it here would reject valid Tab5 user pins.
+  (void)pin;
+  return false;
+#else
   return !((pin >= 1 && pin <= 6) || pin == 20 || pin == 23 ||
            pin == 24 || pin == 25 || pin == 28 || pin == 29 ||
            pin == 30 || pin == 31 || pin == 34);
+#endif
 }
 #endif

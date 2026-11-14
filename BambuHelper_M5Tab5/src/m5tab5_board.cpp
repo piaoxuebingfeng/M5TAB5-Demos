@@ -65,7 +65,7 @@ static_assert(sizeof(inter_10) > 100, "bitmap font table is missing");
 static_assert(SCREEN_W == 1024 && SCREEN_H == 600, "stage-4 layout selector");
 
 const char* m5tab5BoardName() {
-  return "BambuHelper/M5Tab5 stage 4";
+  return "BambuHelper/M5Tab5 stage 6 (app layer live)";
 }
 
 // Referencing the generated blobs keeps them in the linked image: a bare

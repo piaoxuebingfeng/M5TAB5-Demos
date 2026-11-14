@@ -172,7 +172,17 @@ void flushFrame() {
 // at the sprite level (panel MADCTL stays at 0) while CYD/ws_lcd_200 use real
 // hardware MADCTL via LovyanGFX setRotation().
 static uint8_t sanitizeRotation(uint8_t r) {
-  return normalizeDisplayRotation(r);
+  const uint8_t logical = normalizeDisplayRotation(r);
+#if defined(BOARD_IS_M5TAB5)
+  // The Tab5 panel is native portrait (720x1280) while this dashboard is a
+  // landscape canvas. LovyanGFX only swaps the axes for ODD rotations, so the
+  // logical landscape 0/180 orientations have to become hardware 3/1. Passing
+  // them through unchanged leaves the panel portrait and clips 304 of the 1024
+  // canvas columns off the right edge.
+  return (logical & 2) ? 1 : 3;
+#else
+  return logical;
+#endif
 }
 
 // Use user-configured bg color instead of hardcoded CLR_BG
@@ -568,7 +578,12 @@ void initDisplay() {
   tft.setRotation(sanitizeRotation(dispSettings.rotation));
 #endif
   applyPanelInversion();
-  Serial.println("Display: setRotation done");
+  // Logical size after rotation is the single best proof that the Tab5 panel
+  // came up landscape: a portrait answer here means the axes were never swapped
+  // and the 1024-wide canvas is being clipped.
+  Serial.printf("Display: setRotation done (logical %dx%d, canvas %dx%d, user rot %u)\n",
+                (int)tft.width(), (int)tft.height(), SCREEN_W, SCREEN_H,
+                (unsigned)dispSettings.rotation);
   tft.fillScreen(CLR_BG);
   Serial.println("Display: fillScreen done");
 
