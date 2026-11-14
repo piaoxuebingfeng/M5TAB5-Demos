@@ -30,6 +30,9 @@
 #include <Wire.h>     // SenseCAP: PCA9535PW IO expander / ws_lcd_350: TCA9554 LCD reset
 #include "io_expander_tca9554.h"
 #endif
+#if defined(BOARD_IS_M5TAB5)
+#include "m5tab5_board_io.h"   // PI4IOE5V6408 LCD_RST / TP_RST sequencing
+#endif
 #include <new>   // placement new for CYD panel variant selection
 #include "p4_tasmota_stub.h"
 
@@ -311,7 +314,12 @@ static uint8_t lastAppliedBrightness = 0;
 
 void setBacklight(uint8_t level) {
 #if defined(BACKLIGHT_PIN) && BACKLIGHT_PIN >= 0
-  #if defined(BOARD_IS_WS_P4_7B)
+  #if defined(BOARD_IS_M5TAB5)
+  // Tab5 LEDA driver is active high (M5GFX drives GPIO22 at 44.1 kHz the same
+  // way). BOARD_IS_WS_P4_7B is also defined on this build, so the active-low
+  // branch below must not win by falling through.
+  analogWrite(BACKLIGHT_PIN, level);
+  #elif defined(BOARD_IS_WS_P4_7B)
   analogWrite(BACKLIGHT_PIN, 255 - level);  // LCD-7B backlight is active low
   #else
   analogWrite(BACKLIGHT_PIN, level);
@@ -498,6 +506,13 @@ void initDisplay() {
   Wire.write((0 << PCA9535_PIN_DISP_CS) | (1 << PCA9535_PIN_DISP_RST) | (1 << PCA9535_PIN_TOUCH_RST));  // CS LOW
   Wire.endTransmission();
   delay(1);
+#elif defined(BOARD_IS_M5TAB5)
+  // PI4IOE5V6408 sequence before the panel: WLAN_PWR_EN on, LCD_RST + TP_RST
+  // pulsed with TP_INT held high so the GT911 latches 0x14. The DSI PHY does
+  // not answer while LCD_RST is low, so this cannot move after init().
+  if (!m5tab5IoBegin()) {
+    Serial.println("Display: PI4IOE5V6408 init FAILED (no ack on 0x43/0x44)");
+  }
 #else
   Serial.println("Display: pre-init delay...");
   delay(500);
@@ -516,7 +531,10 @@ void initDisplay() {
 #endif
   Serial.println("Display: calling _tft_instance.init()...");
   if (!_tft_instance.init()) {
-#if defined(BOARD_IS_WS_P4_7B)
+#if defined(BOARD_IS_M5TAB5)
+    Serial.println("Tab5 panel init failed: check PSRAM speed (200 MHz) and the PI4IOE reset sequence");
+    while (true) delay(1000);
+#elif defined(BOARD_IS_WS_P4_7B)
     Serial.println("LCD-7B initialization failed; check the selected P4 silicon revision and PSRAM");
     while (true) delay(1000);
 #endif
@@ -584,7 +602,9 @@ void initDisplay() {
 
 #if defined(BACKLIGHT_PIN) && BACKLIGHT_PIN >= 0
   pinMode(BACKLIGHT_PIN, OUTPUT);
-#if defined(BOARD_IS_WS_P4_7B)
+#if defined(BOARD_IS_M5TAB5)
+  analogWriteFrequency(BACKLIGHT_PIN, 44100);   // matches M5GFX's Tab5 backlight PWM
+#elif defined(BOARD_IS_WS_P4_7B)
   analogWriteFrequency(BACKLIGHT_PIN, 5000);
 #endif
   setBacklight(200);

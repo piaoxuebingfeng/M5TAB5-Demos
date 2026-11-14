@@ -55,6 +55,44 @@
 #define GT911_SCL M5TAB5_TOUCH_SCL
 #define GT911_INT M5TAB5_TOUCH_INT
 
+// --- I2C bus / board control ---------------------------------------------
+// One system bus carries the two PI4IOE5V6408 expanders, the GT911, the
+// BMI270 IMU, the RX8130CE RTC, the INA226 fuel gauge and both audio codecs.
+#define M5TAB5_SYS_I2C_SDA 31
+#define M5TAB5_SYS_I2C_SCL 32
+
+#define M5TAB5_PI4IOE_1_ADDR 0x43   // resets, speaker, camera, RF path
+#define M5TAB5_PI4IOE_2_ADDR 0x44   // C6 power, USB-A 5V, charger
+
+// PI4IOE-1 bit map (see m5tab5_board_io.cpp for the source of these bits).
+#define M5TAB5_IO1_SPK_EN  2
+#define M5TAB5_IO1_LCD_RST 4
+#define M5TAB5_IO1_TP_RST  5
+#define M5TAB5_IO1_CAM_RST 6
+// PI4IOE-2 bit map.
+#define M5TAB5_IO2_WLAN_PWR_EN 0
+
+#define M5TAB5_INA226_ADDR 0x41
+
+// --- ESP32-C6 SDIO (ESP-Hosted) ------------------------------------------
+// Official Tab5 map: D0=G11 D1=G10 D2=G9 D3=G8 CMD=G13 CLK=G12 RESET=G15.
+// hostedSetPins() must run before the first WiFi call - the radio lives on the
+// other side of this bus. (G14 = C6 IO2, not part of the SDIO bus.)
+#define M5TAB5_HOSTED_CLK 12
+#define M5TAB5_HOSTED_CMD 13
+#define M5TAB5_HOSTED_D0  11
+#define M5TAB5_HOSTED_D1  10
+#define M5TAB5_HOSTED_D2  9
+#define M5TAB5_HOSTED_D3  8
+#define M5TAB5_HOSTED_RST 15
+
+// Battery: NP-F550 7.4 V pack behind IP2326, monitored by an INA226 at 0x41.
+// BambuHelper only has AXP2101 and ADC backends, so BOARD_HAS_BATTERY stays
+// undefined until an INA226 backend exists - enabling it now would compile an
+// empty battery.cpp and break the link.
+// #define BOARD_HAS_BATTERY 1
+// #define BOARD_HAS_BAT_INA226 1
+
 // Note: no BOARD_HAS_ES8311_AUDIO here. Tab5 uses ES8388 + ES7210, so the
 // Waveshare ES8311/I2S backend must not be compiled.
 
